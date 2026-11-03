@@ -77,6 +77,80 @@ func (a *Agent) appBase(slug string) string {
 	return filepath.Join(a.home, "apps", slug)
 }
 
+func (a *Agent) appPIDPath(slug string) string {
+	return filepath.Join(a.appBase(slug), "app.pid")
+}
+
+func writePIDFile(path string, pid int) {
+	if pid <= 0 {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(path), 0o755)
+	_ = os.WriteFile(path, []byte(strconv.Itoa(pid)+"\n"), 0o600)
+}
+
+func readPIDFile(path string) int {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
+}
+
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// processMatchesDir reports whether pid belongs to this user and was started
+// from dir (its working directory) or references dir in its command line.
+// Android denies /proc/net/tcp to apps, so cwd and cmdline are the portable
+// way to attribute a process to a supervised app.
+func processMatchesDir(pid int, dir string) bool {
+	if pid <= 0 || pid == os.Getpid() || dir == "" || !sameUser(pid) {
+		return false
+	}
+	if link, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid)); err == nil {
+		if link == dir || strings.HasPrefix(link, dir+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
+		if strings.Contains(string(b), dir) {
+			return true
+		}
+	}
+	return false
+}
+
+func processesInDir(dir string) []int {
+	if dir == "" {
+		return nil
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	var pids []int
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		if processMatchesDir(pid, dir) {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
 func (a *Agent) loadApps() error {
 	b, err := os.ReadFile(a.appsPath)
 	if err != nil {
@@ -101,6 +175,9 @@ func (a *Agent) loadApps() error {
 }
 
 func (a *Agent) saveApps() {
+	a.appsSaveMu.Lock()
+	defer a.appsSaveMu.Unlock()
+
 	a.appsMu.Lock()
 	specs := make([]AppSpec, 0, len(a.apps))
 	for _, p := range a.apps {
@@ -112,6 +189,10 @@ func (a *Agent) saveApps() {
 	sort.Slice(specs, func(i, j int) bool { return specs[i].Slug < specs[j].Slug })
 	b, err := json.MarshalIndent(specs, "", "  ")
 	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(a.appsPath), 0o700); err != nil {
+		a.log.Warn("save apps", "err", err)
 		return
 	}
 	tmp := a.appsPath + ".tmp"
@@ -164,13 +245,54 @@ func (a *Agent) restoreApps() {
 				a.log.Warn("release directory missing, not restoring", "slug", spec.Slug, "dir", spec.ReleaseDir)
 				continue
 			}
-			a.log.Info("restoring app", "slug", spec.Slug, "port", spec.Port)
 			p := a.ensureApp(spec.Slug, spec.Name, spec.Port)
+			if a.adoptRunning(p, spec) {
+				continue
+			}
+			a.log.Info("restoring app", "slug", spec.Slug, "port", spec.Port)
 			if err := a.startProcess(p, spec); err != nil {
 				a.log.Warn("restore app failed", "slug", spec.Slug, "err", err)
 			}
 		}
 	}()
+}
+
+// adoptRunning re-attaches to a process that is already serving the app's port
+// after an agent restart. Android can keep the old process group alive when the
+// agent is killed, and /proc/net/tcp is not readable there, so the pidfile plus
+// the process working directory are the reliable evidence.
+func (a *Agent) adoptRunning(p *appProcess, spec AppSpec) bool {
+	if spec.Embedded || spec.Port <= 0 || !portListening(spec.Port) {
+		return false
+	}
+	pid := readPIDFile(a.appPIDPath(spec.Slug))
+	if pid > 0 && !processMatchesDir(pid, spec.ReleaseDir) {
+		pid = 0
+	}
+	if pid == 0 {
+		if pids := processesInDir(spec.ReleaseDir); len(pids) > 0 {
+			pid = pids[0]
+		}
+	}
+	if pid == 0 {
+		return false
+	}
+	p.mu.Lock()
+	p.spec = spec
+	p.cmd = nil
+	p.done = nil
+	p.gen++
+	p.pid = pid
+	p.status = "running"
+	p.stopping = false
+	p.deploying = false
+	p.lastError = ""
+	p.logPath = filepath.Join(a.appBase(spec.Slug), "logs", "app.log")
+	p.startedAt = time.Now()
+	p.mu.Unlock()
+	writePIDFile(a.appPIDPath(spec.Slug), pid)
+	a.log.Info("adopted running app", "slug", spec.Slug, "pid", pid, "port", spec.Port)
+	return true
 }
 
 func (a *Agent) startApp(spec AppSpec) error {
@@ -210,7 +332,7 @@ func (a *Agent) startProcess(p *appProcess, spec AppSpec) error {
 	if _, err := os.Stat(spec.ReleaseDir); err != nil {
 		return fmt.Errorf("release directory missing: %w", err)
 	}
-	if err := a.ensurePortFree(context.Background(), spec.Port, 3*time.Second); err != nil {
+	if err := a.ensurePortFree(context.Background(), spec.Port, spec.ReleaseDir, 3*time.Second); err != nil {
 		return err
 	}
 	base := a.appBase(spec.Slug)
@@ -250,6 +372,7 @@ func (a *Agent) startProcess(p *appProcess, spec AppSpec) error {
 	p.logPath = logPath
 	p.startedAt = time.Now()
 	p.mu.Unlock()
+	writePIDFile(a.appPIDPath(spec.Slug), cmd.Process.Pid)
 	a.saveApps()
 	a.log.Info("app started", "slug", spec.Slug, "pid", cmd.Process.Pid, "port", spec.Port)
 	go a.waitProcess(p, cmd, logFile, done, gen)
@@ -267,6 +390,7 @@ func (a *Agent) waitProcess(p *appProcess, cmd *exec.Cmd, logFile *os.File, done
 	}
 	p.cmd = nil
 	p.pid = 0
+	_ = os.Remove(a.appPIDPath(p.spec.Slug))
 	if p.stopping {
 		p.stopping = false
 		p.status = "stopped"
@@ -318,33 +442,59 @@ func (a *Agent) stopProcess(p *appProcess) {
 	p.mu.Lock()
 	cmd := p.cmd
 	done := p.done
-	if cmd == nil {
+	pid := p.pid
+	spec := p.spec
+	if cmd == nil && pid <= 0 {
 		p.status = "stopped"
 		p.stopping = false
 		p.mu.Unlock()
 		return
 	}
-	sig := stopSignal(p.spec.StopSignal)
-	timeout := time.Duration(p.spec.StopTimeout) * time.Second
+	sig := stopSignal(spec.StopSignal)
+	timeout := time.Duration(spec.StopTimeout) * time.Second
 	if timeout <= 0 {
 		timeout = 4 * time.Second
 	}
 	p.stopping = true
 	p.mu.Unlock()
 
-	if cmd.Process != nil {
+	if cmd != nil && cmd.Process != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, sig)
+	} else if pid > 0 {
+		// Adopted process from a previous agent: no exec.Cmd, but the
+		// process group is still ours.
+		_ = syscall.Kill(-pid, sig)
+		_ = syscall.Kill(pid, sig)
 	}
-	select {
-	case <-done:
-	case <-time.After(timeout):
-		if cmd.Process != nil {
-			killProcessGroup(cmd.Process.Pid)
-		}
+	if done != nil {
 		select {
 		case <-done:
-		case <-time.After(2 * time.Second):
+		case <-time.After(timeout):
+			if cmd != nil && cmd.Process != nil {
+				killProcessGroup(cmd.Process.Pid)
+			}
+			if pid > 0 {
+				killProcessGroup(pid)
+			}
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+			}
 		}
+	} else if pid > 0 {
+		deadline := time.Now().Add(timeout)
+		for processAlive(pid) && time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+		}
+		if processAlive(pid) {
+			killProcessGroup(pid)
+		}
+	}
+	// A child may have ignored the group signal or been re-parented. Anything
+	// still running from the app directory belongs to this app.
+	for _, leftover := range processesInDir(spec.ReleaseDir) {
+		a.log.Warn("killing leftover app process", "slug", spec.Slug, "pid", leftover)
+		killProcessGroup(leftover)
 	}
 	p.mu.Lock()
 	if p.cmd == cmd {
@@ -353,6 +503,7 @@ func (a *Agent) stopProcess(p *appProcess) {
 		p.status = "stopped"
 	}
 	p.mu.Unlock()
+	_ = os.Remove(a.appPIDPath(spec.Slug))
 }
 
 func (a *Agent) stopApp(slug string) error {
@@ -596,7 +747,7 @@ func portListening(port int) bool {
 // orphan holdover (a previous agent process that outlived its supervisor). This
 // prevents a new release from silently failing to bind while an old process
 // keeps answering health checks and traffic.
-func (a *Agent) ensurePortFree(ctx context.Context, port int, timeout time.Duration) error {
+func (a *Agent) ensurePortFree(ctx context.Context, port int, dir string, timeout time.Duration) error {
 	if port <= 0 {
 		return errors.New("invalid port")
 	}
@@ -604,6 +755,12 @@ func (a *Agent) ensurePortFree(ctx context.Context, port int, timeout time.Durat
 	for portListening(port) {
 		if time.Now().After(deadline) {
 			pids, _ := portHolders(port)
+			if len(pids) == 0 && dir != "" {
+				// Android denies /proc/net/tcp to apps; fall back to the
+				// process working directory, which the kernel still exposes
+				// to the same UID.
+				pids = processesInDir(dir)
+			}
 			killed := 0
 			for _, pid := range pids {
 				if pid == os.Getpid() || !sameUser(pid) {

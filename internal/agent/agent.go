@@ -77,12 +77,13 @@ type Agent struct {
 	metricsAt   time.Time
 	metricsBusy bool
 
-	ctx      context.Context
-	appsMu   sync.Mutex
-	apps     map[string]*appProcess
-	appsPath string
-	deployMu sync.Mutex
-	addonMu  sync.Mutex
+	ctx        context.Context
+	appsMu     sync.Mutex
+	apps       map[string]*appProcess
+	appsPath   string
+	appsSaveMu sync.Mutex
+	deployMu   sync.Mutex
+	addonMu    sync.Mutex
 
 	tunMu   sync.Mutex
 	tunSess *yamux.Session

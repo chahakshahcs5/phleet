@@ -115,6 +115,7 @@ func (a *Agent) handleDeploy(ctx context.Context, req agentproto.DeployRequest, 
 		}
 		cloneArgs = append(cloneArgs, req.Repo, releaseDir)
 		if a.gitPath == "" {
+			cloneCancel()
 			fail("git is not installed on this phone")
 			return
 		}
