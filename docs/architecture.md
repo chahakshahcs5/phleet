@@ -130,7 +130,10 @@ app are reachable.
 | `deployments` | one row per deploy (per phone) with status and timing |
 | `deploy_logs` | streamed deploy output, pruned with its deployment |
 | `alerts` | keyed alerts with severity, status (firing/ack/resolved) and timestamps |
-| `settings` | key/value (alert thresholds, notification config) |
+| `settings` | key/value (alert thresholds, notification config, admin TOTP) |
+| `users` | password accounts, role, encrypted TOTP secret, disabled flag |
+| `api_tokens` | hashed scoped `admin`/`viewer` tokens and last-used timestamp |
+| `jobs` | background onboarding jobs with bounded output (7-day retention) |
 | `addons` | engine instance, pinned phone, protocol/bridge ports, storage hostname, data dir, encrypted credentials, status, **epoch** |
 | `addon_placements` | addon → phone, role (`primary`/`standby`/`demoted`), pid/restarts, replay lag — sticky, never scheduled away |
 | `addon_bindings` | addon ↔ project; drives environment injection |

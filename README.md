@@ -347,7 +347,7 @@ The detail page gives you:
 
 - **Console** — one-shot SQL or Redis commands, piped to `psql`/`redis-cli`/`sqlite3` on the phone.
 - **Backups** — dump on the phone, upload in 32 MB chunks (so a large dump survives Cloudflare's 100 MB request cap),
-  keep the last 10, download or restore. SHA-256 is stored with each backup and verified before a restore. A pre-restore snapshot is written under the addon's
+  keep the last 10, download, verify or restore. SHA-256 is stored with each backup and verified before a restore; **Verify** runs an engine-native integrity check against the downloaded dump. A pre-restore snapshot is written under the addon's
   data `backups/` directory (the last two are kept) so the previous state is still retrievable from the file browser. An automatic daily backup runs when the phone is charging or above 40 %.
 - **Replication** — add a standby on another phone, watch replay lag, promote manually after the old primary is
   fenced. PostgreSQL uses streaming replication; Redis uses `REPLICAOF`. SQLite and S3 have no standby. **Automatic
@@ -446,6 +446,7 @@ No notification credentials? Alerts still appear in the panel and the sidebar ba
 - The shared fleet token is now an **enrollment token**. On the first hello the control plane issues a random per-device token, stores only its SHA-256 hash, and overwrites the phone's `agent.token`. Later control and data connections must present that device token; the shared token cannot re-enroll an existing phone. The device token is never accepted by the panel API.
 - The agent token lives in `~/.phleet/agent.token` (mode `0600`) and is passed with `--token-file`, not in the process command line. Apps and services run as the same Termux user, so a leaked device token still lets its holder act as that phone; per-device isolation is only as strong as the phone's OS sandbox.
 - Re-running the bootstrap on an already-enrolled phone is rejected until you delete the phone in **Fleet → Server → Settings** (or keep its existing `agent.token`). This prevents the shared enrollment token from taking over an existing device.
+- **Settings → Users** creates password accounts with `admin` or `viewer` roles. Sessions are signed user cookies; role changes and disabled accounts take effect on the next request. Per-user TOTP is available under Security.
 - **Settings → API tokens** creates scoped bearer tokens. `viewer` tokens are read-only and excluded from credentials, source archives, backups, file contents, jobs and token management; `admin` tokens have the same access as the admin token. Revocation is immediate.
 - Admin login can require a TOTP second factor (**Settings → Security → Set up 2FA**). If the authenticator is lost, run `phleet totp -disable` on the control-plane host as a break-glass recovery.
 - State-changing panel requests are origin-checked, JSON bodies require `Content-Type: application/json`, and the terminal WebSocket rejects sibling-subdomain origins. This is what keeps a compromised project or service from driving the panel.
