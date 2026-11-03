@@ -1,0 +1,57 @@
+name: Deploy phleet project
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_id:
+        description: phleet project ID
+        required: true
+        type: string
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Skip the push trigger until the repository variable is configured.
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.PHLEET_PROJECT_ID != '' }}
+    steps:
+      - name: Trigger deploy
+        env:
+          PHLEET_URL: ${{ secrets.PHLEET_URL }}
+          PHLEET_TOKEN: ${{ secrets.PHLEET_TOKEN }}
+          PROJECT_ID: ${{ inputs.project_id || vars.PHLEET_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$PHLEET_URL" || { echo "PHLEET_URL secret is missing"; exit 1; }
+          test -n "$PHLEET_TOKEN" || { echo "PHLEET_TOKEN secret is missing"; exit 1; }
+          test -n "$PROJECT_ID" || { echo "project_id input or PHLEET_PROJECT_ID variable is missing"; exit 1; }
+          curl -fsS -X POST \
+            "$PHLEET_URL/api/projects/$PROJECT_ID/deploy" \
+            -H "Authorization: Bearer $PHLEET_TOKEN"
+
+      - name: Wait for deploy result
+        env:
+          PHLEET_URL: ${{ secrets.PHLEET_URL }}
+          PHLEET_TOKEN: ${{ secrets.PHLEET_TOKEN }}
+          PROJECT_ID: ${{ inputs.project_id || vars.PHLEET_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 120); do
+            body=$(curl -fsS \
+              -H "Authorization: Bearer $PHLEET_TOKEN" \
+              "$PHLEET_URL/api/projects/$PROJECT_ID/deployments")
+            status=$(printf '%s' "$body" | jq -r '.deployments[0].status // "queued"')
+            echo "deployment status: $status"
+            case "$status" in
+              active) exit 0 ;;
+              failed|rolled_back)
+                detail=$(printf '%s' "$body" | jq -r '.deployments[0].detail // ""')
+                echo "deployment ended as $status: $detail"
+                exit 1
+                ;;
+            esac
+            sleep 5
+          done
+          echo "timed out waiting for the deployment"
+          exit 1

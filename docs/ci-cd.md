@@ -49,8 +49,16 @@ POST /api/projects/{id}/rollback
 
 ## GitHub Actions
 
-Store `PHLEET_URL`, `PHLEET_PROJECT_ID` and `PHLEET_TOKEN` as repository or
-environment secrets.
+This repository contains a ready-to-use
+[`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml). It runs on
+manual dispatch and on pushes to `main` when `PHLEET_PROJECT_ID` is configured
+as a repository variable.
+
+Store `PHLEET_URL` and `PHLEET_TOKEN` as repository secrets, and
+`PHLEET_PROJECT_ID` as a repository variable. The manual dispatch form also
+accepts a project ID.
+
+The equivalent inline workflow is:
 
 ```yaml
 name: Deploy
