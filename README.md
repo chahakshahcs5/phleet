@@ -455,8 +455,9 @@ No notification credentials? Alerts still appear in the panel and the sidebar ba
   requires its generated password, but treat it as a deliberate opt-in.
 - Addon relays are per addon and per phone. An agent can only open a relay for an addon the control plane explicitly
   assigned to it, and the relay terminates at the addon's primary port.
-- Addon credentials use the same encryption. Backups are dumps of real data and are **not** encrypted at rest on the
-  control plane; remove them from the addon page when you no longer need them.
+- Addon credentials use the same encryption. Backups are dumps of real data; new backups are encrypted at rest with
+  chunked AES-256-GCM, carry a SHA-256 of the plaintext, and are verified before restore. Remove them from the addon
+  page when you no longer need them.
 
 Known proxy limits: HTTP requests to project apps are capped at 32 MB, phleet uploads at 64 MB and downloads at 96 MB,
 and only ports phleet allocated to a supervised app are reachable. S3 bodies stream through a 96 MB cap (stay under

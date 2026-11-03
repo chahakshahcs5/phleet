@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -1214,6 +1216,16 @@ func TestChunkedBackupUpload(t *testing.T) {
 	sum := sha256.Sum256([]byte("hello world"))
 	if b.Checksum != hex.EncodeToString(sum[:]) {
 		t.Fatalf("backup checksum = %q", b.Checksum)
+	}
+	if !b.Encrypted {
+		t.Fatal("new backups must be encrypted at rest")
+	}
+	raw, err := os.ReadFile(b.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("hello world")) {
+		t.Fatal("plaintext leaked into stored backup")
 	}
 	code, data := h.doRaw(t, http.MethodGet, "/api/addons/a-chunk/backups/b-chunk/download", nil)
 	if code != 200 || string(data) != "hello world" {

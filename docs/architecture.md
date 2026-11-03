@@ -136,7 +136,7 @@ app are reachable.
 | `addon_bindings` | addon ↔ project; drives environment injection |
 | `addon_relays` | addon → app phone loopback facade port |
 | `addon_logs` | provisioning, relay, backup, promotion and restore output (30-day retention) |
-| `backups` | dump metadata and the control-plane file path (last 10 per addon) |
+| `backups` | dump metadata, plaintext SHA-256, encryption flag and control-plane file path (last 10 per addon) |
 
 Retention: raw samples for 14 days, deployment history for 30 days, each deployment keeps its log lines.
 Metrics queries downsample to 30 s / 1 min / 5 min / 30 min buckets depending on the window, so the UI never loads
@@ -251,9 +251,10 @@ replication role), encrypted with the control plane key and never listed. Deploy
 therefore run multiple replicas, each using loopback (same phone) or a facade (other phones).
 
 Backups are produced on the phone (`pg_dump -Fc`, `redis-cli --rdb`, SQLite `.backup`, a tar of the bucket), uploaded
-in 32 MB chunks under `<data>/backups/<addon>/`, and pruned to ten. Restore downloads to the **agent state dir** (not
-the data dir, which rclone's restore clears) and runs the engine's restore path; Postgres restores through a live
-connection, Redis, SQLite and rclone are stopped first. A background loop takes a daily backup when the phone is
+in 32 MB chunks under `<data>/backups/<addon>/`, encrypted with chunked AES-256-GCM, checksummed with the plaintext
+SHA-256, and pruned to ten. Restore verifies the checksum, writes a local pre-restore snapshot under the addon's
+`backups/` directory, downloads to the **agent state dir** (not the data dir, which rclone's restore clears) and runs
+the engine's restore path; Postgres restores through a live connection, Redis, SQLite and rclone are stopped first. A background loop takes a daily backup when the phone is
 charging or above 40 %.
 
 Replication is explicit: `POST /addons/{id}/standby` allocates a port and data directory on another phone, opens a
@@ -364,7 +365,7 @@ is kept for 90 days. Thresholds are editable at runtime; notifications go to a T
 | PC → database bridge | binds `127.0.0.1` by default; `-bridge-lan` is an explicit opt-in and the engine still requires its password |
 | Phone → phone relay | the control plane only forwards a relay stream when an `addon_relays` row authorizes that addon on that phone, and the target is the current primary's protocol port |
 | Source bundles | uploaded zips live under `%ProgramData%\phleet\bundles` and are served only to authenticated agents/admins; they are not encrypted at rest |
-| Addon backups | dumps live under `%ProgramData%\phleet\backups` and contain application data; they are not encrypted at rest and are removed with the addon |
+| Addon backups | dumps live under `%ProgramData%\phleet\backups`, are encrypted at rest with chunked AES-256-GCM, carry a plaintext SHA-256, and are removed with the addon |
 | Data at rest | SQLite and tokens under `%ProgramData%\phleet`, outside OneDrive; project env encrypted with AES-256-GCM; tokens are file-permission protected |
 | Audit | connection, exec, file write/upload/delete, terminal, project create/delete and deploy lifecycle events are recorded |
 
