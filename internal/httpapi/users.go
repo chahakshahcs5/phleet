@@ -42,8 +42,8 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	if role == "" {
 		role = "viewer"
 	}
-	if role != "admin" && role != "viewer" {
-		apiErr(w, 400, errors.New("role must be admin or viewer"))
+	if role != "admin" && role != "viewer" && role != "deployer" {
+		apiErr(w, 400, errors.New("role must be admin, deployer or viewer"))
 		return
 	}
 	if _, err := s.st.GetUserByUsername(username); err == nil {
@@ -80,8 +80,8 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Role != nil {
 		role := strings.ToLower(strings.TrimSpace(*body.Role))
-		if role != "admin" && role != "viewer" {
-			apiErr(w, 400, errors.New("role must be admin or viewer"))
+		if role != "admin" && role != "viewer" && role != "deployer" {
+			apiErr(w, 400, errors.New("role must be admin, deployer or viewer"))
 			return
 		}
 		u.Role = role

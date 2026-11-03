@@ -124,7 +124,7 @@ export interface Me {
   dataDir: string
   publicUrl: string
   agentsOnline: number
-  role?: 'admin' | 'viewer'
+  role?: 'admin' | 'deployer' | 'viewer'
   username?: string
 }
 
@@ -421,7 +421,7 @@ export interface ProvisionResult {
 export interface User {
   id: string
   username: string
-  role: 'admin' | 'viewer'
+  role: 'admin' | 'deployer' | 'viewer'
   disabled: boolean
   createdAt: number
   updatedAt: number
@@ -430,7 +430,7 @@ export interface User {
 export interface APIToken {
   id: string
   name: string
-  role: 'admin' | 'viewer'
+  role: 'admin' | 'deployer' | 'viewer'
   createdAt: number
   lastUsedAt: number
 }

@@ -452,7 +452,7 @@ No notification credentials? Alerts still appear in the panel and the sidebar ba
 - The agent token lives in `~/.phleet/agent.token` (mode `0600`) and is passed with `--token-file`, not in the process command line. Apps and services run as the same Termux user, so a leaked device token still lets its holder act as that phone; per-device isolation is only as strong as the phone's OS sandbox.
 - Re-running the bootstrap on an already-enrolled phone is rejected until you delete the phone in **Fleet → Server → Settings** (or keep its existing `agent.token`). This prevents the shared enrollment token from taking over an existing device.
 - **Settings → Users** creates password accounts with `admin` or `viewer` roles. Sessions are signed user cookies; role changes and disabled accounts take effect on the next request. Per-user TOTP is available under Security.
-- **Settings → API tokens** creates scoped bearer tokens. `viewer` tokens are read-only and excluded from credentials, source archives, backups, file contents, jobs and token management; `admin` tokens have the same access as the admin token. Revocation is immediate.
+- **Settings → API tokens** creates scoped bearer tokens. `viewer` tokens are read-only; `deployer` tokens can only drive project lifecycle actions; `admin` tokens have the same access as the admin token. All are excluded from credentials, source archives, backups, file contents, jobs and token management unless admin. Revocation is immediate.
 - Admin login can require a TOTP second factor (**Settings → Security → Set up 2FA**). If the authenticator is lost, run `phleet totp -disable` on the control-plane host as a break-glass recovery.
 - Agents self-update from an Ed25519-signed manifest. `phleetd` keeps the signing key in `update.key` and serves the public key at `/download/update.pub`; the bootstrap pins it as `update.pub`. An agent replaces itself atomically only after verifying the signature and SHA-256, and checks every six hours. Bump `config.Version` when publishing a new agent build.
 - State-changing panel requests are origin-checked, JSON bodies require `Content-Type: application/json`, and the terminal WebSocket rejects sibling-subdomain origins. This is what keeps a compromised project or service from driving the panel.
@@ -572,7 +572,9 @@ deploy/windows/      scheduled task installer
 docs/runbooks/       database failover procedure
 ```
 
-See [docs/architecture.md](docs/architecture.md) for the protocol, failure model and deploy design.
+See [docs/architecture.md](docs/architecture.md) for the protocol, failure model and deploy design, and
+[docs/ci-cd.md](docs/ci-cd.md) for triggering deploys from GitHub Actions, GitLab CI or any other CI system with a
+scoped `deployer` token.
 
 ## Roadmap
 

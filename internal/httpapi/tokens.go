@@ -34,8 +34,8 @@ func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	role := strings.ToLower(strings.TrimSpace(body.Role))
-	if role != "admin" && role != "viewer" {
-		apiErr(w, 400, errors.New("role must be admin or viewer"))
+	if role != "admin" && role != "viewer" && role != "deployer" {
+		apiErr(w, 400, errors.New("role must be admin, deployer or viewer"))
 		return
 	}
 	tok := randomHex(32)

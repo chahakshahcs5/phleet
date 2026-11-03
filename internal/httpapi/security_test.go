@@ -350,6 +350,37 @@ func TestAgentUpdateManifestIsSigned(t *testing.T) {
 	}
 }
 
+func TestDeployerAPITokenCanDeployButNotAdminister(t *testing.T) {
+	s := testServer(t)
+	if err := s.st.CreateAPIToken(model.APIToken{
+		ID: "deployer-token", Name: "ci", Role: "deployer",
+	}, tokenHash("deployer-secret")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.st.CreateProject(model.Project{
+		ID: "p-ci", Name: "CI", Slug: "ci", Kind: "app", Replicas: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	call := func(method, path string) int {
+		req := httptest.NewRequest(method, path, strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer deployer-secret")
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rr, req)
+		return rr.Code
+	}
+	if code := call(http.MethodGet, "/api/projects"); code != http.StatusOK {
+		t.Fatalf("deployer read = %d", code)
+	}
+	if code := call(http.MethodPost, "/api/projects/p-ci/deploy"); code == http.StatusForbidden || code == http.StatusUnauthorized {
+		t.Fatalf("deployer deploy was refused: %d", code)
+	}
+	if code := call(http.MethodGet, "/api/users"); code != http.StatusForbidden {
+		t.Fatalf("deployer read users = %d", code)
+	}
+}
+
 func TestMetricsRequiresPanelAuth(t *testing.T) {
 	s := testServer(t)
 	rr := httptest.NewRecorder()

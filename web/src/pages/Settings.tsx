@@ -13,13 +13,13 @@ export default function Settings() {
   const qc = useQueryClient()
   const [studioOpen, setStudioOpen] = useState(false)
   const [tokenName, setTokenName] = useState('')
-  const [tokenRole, setTokenRole] = useState<'admin' | 'viewer'>('viewer')
+  const [tokenRole, setTokenRole] = useState<'admin' | 'deployer' | 'viewer'>('viewer')
   const [createdToken, setCreatedToken] = useState('')
   const [totpSetup, setTotpSetup] = useState<{ secret: string; url: string } | null>(null)
   const [totpCode, setTotpCode] = useState('')
   const [newUsername, setNewUsername] = useState('')
   const [newPassword, setNewPassword] = useState('')
-  const [newRole, setNewRole] = useState<'admin' | 'viewer'>('viewer')
+  const [newRole, setNewRole] = useState<'admin' | 'deployer' | 'viewer'>('viewer')
   const [resetUser, setResetUser] = useState<User | null>(null)
   const [resetPassword, setResetPassword] = useState('')
   const base = me.data?.publicUrl || 'https://fleet.example.com'
@@ -51,7 +51,7 @@ export default function Settings() {
     },
   })
   const updateUser = useMutation({
-    mutationFn: (args: { id: string; role?: 'admin' | 'viewer'; disabled?: boolean }) =>
+    mutationFn: (args: { id: string; role?: 'admin' | 'deployer' | 'viewer'; disabled?: boolean }) =>
       api.updateUser(args.id, { role: args.role, disabled: args.disabled }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
   })
@@ -174,9 +174,10 @@ export default function Settings() {
             <select
               className="mt-1 h-9 rounded-lg border border-zinc-800 bg-zinc-950/70 px-3 text-xs text-zinc-200 outline-none"
               value={newRole}
-              onChange={(e) => setNewRole(e.target.value as 'admin' | 'viewer')}
+              onChange={(e) => setNewRole(e.target.value as 'admin' | 'deployer' | 'viewer')}
             >
               <option value="viewer">viewer</option>
+              <option value="deployer">deployer</option>
               <option value="admin">admin</option>
             </select>
           </label>
@@ -195,17 +196,26 @@ export default function Settings() {
             <div key={u.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
               <div className="flex items-center gap-2 text-[11px] text-zinc-300">
                 <span className="font-medium">{u.username}</span>
-                <Badge tone={u.role === 'admin' ? 'warn' : 'neutral'}>{u.role}</Badge>
+                <Badge tone={u.role === 'admin' ? 'warn' : u.role === 'deployer' ? 'info' : 'neutral'}>
+                  {u.role}
+                </Badge>
                 {u.disabled ? <Badge tone="bad">disabled</Badge> : null}
               </div>
               <div className="flex items-center gap-1">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => updateUser.mutate({ id: u.id, role: u.role === 'admin' ? 'viewer' : 'admin' })}
+                <select
+                  className="h-8 rounded-md border border-zinc-800 bg-zinc-950 px-2 text-[10px] text-zinc-300 outline-none"
+                  value={u.role}
+                  onChange={(e) =>
+                    updateUser.mutate({
+                      id: u.id,
+                      role: e.target.value as 'admin' | 'deployer' | 'viewer',
+                    })
+                  }
                 >
-                  {u.role === 'admin' ? 'Make viewer' : 'Make admin'}
-                </Button>
+                  <option value="viewer">viewer</option>
+                  <option value="deployer">deployer</option>
+                  <option value="admin">admin</option>
+                </select>
                 <Button
                   size="sm"
                   variant="ghost"
@@ -278,9 +288,10 @@ export default function Settings() {
             <select
               className="mt-1 h-9 rounded-lg border border-zinc-800 bg-zinc-950/70 px-3 text-xs text-zinc-200 outline-none"
               value={tokenRole}
-              onChange={(e) => setTokenRole(e.target.value as 'admin' | 'viewer')}
+              onChange={(e) => setTokenRole(e.target.value as 'admin' | 'deployer' | 'viewer')}
             >
               <option value="viewer">viewer</option>
+              <option value="deployer">deployer</option>
               <option value="admin">admin</option>
             </select>
           </label>
@@ -319,7 +330,9 @@ export default function Settings() {
               <div className="min-w-0">
                 <div className="flex items-center gap-2 text-[11px] text-zinc-300">
                   <span className="truncate">{t.name}</span>
-                  <Badge tone={t.role === 'admin' ? 'warn' : 'neutral'}>{t.role}</Badge>
+                  <Badge tone={t.role === 'admin' ? 'warn' : t.role === 'deployer' ? 'info' : 'neutral'}>
+                    {t.role}
+                  </Badge>
                 </div>
                 <div className="mt-0.5 text-[10px] text-zinc-600">
                   created {new Date(t.createdAt * 1000).toLocaleDateString()}

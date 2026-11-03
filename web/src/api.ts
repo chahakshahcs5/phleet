@@ -153,9 +153,9 @@ export const api = {
   }) => request<ProvisionResult>('/api/servers/provision', { method: 'POST', body: JSON.stringify(body) }),
   job: (id: string) => request<{ job: Job }>(`/api/jobs/${id}`),
   users: () => request<{ users: User[] }>('/api/users'),
-  createUser: (body: { username: string; password: string; role: 'admin' | 'viewer' }) =>
+  createUser: (body: { username: string; password: string; role: 'admin' | 'deployer' | 'viewer' }) =>
     request<{ user: User }>('/api/users', { method: 'POST', body: JSON.stringify(body) }),
-  updateUser: (id: string, body: { role?: 'admin' | 'viewer'; disabled?: boolean }) =>
+  updateUser: (id: string, body: { role?: 'admin' | 'deployer' | 'viewer'; disabled?: boolean }) =>
     request<{ user: User }>(`/api/users/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   resetUserPassword: (id: string, password: string) =>
     request<{ ok: boolean }>(`/api/users/${id}/password`, {
@@ -164,7 +164,7 @@ export const api = {
     }),
   deleteUser: (id: string) => request<{ ok: boolean }>(`/api/users/${id}`, { method: 'DELETE' }),
   apiTokens: () => request<{ tokens: APIToken[] }>('/api/api-tokens'),
-  createAPIToken: (body: { name: string; role: 'admin' | 'viewer' }) =>
+  createAPIToken: (body: { name: string; role: 'admin' | 'deployer' | 'viewer' }) =>
     request<{ token: string; apiToken: APIToken }>('/api/api-tokens', {
       method: 'POST',
       body: JSON.stringify(body),

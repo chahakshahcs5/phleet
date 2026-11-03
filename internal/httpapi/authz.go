@@ -21,6 +21,25 @@ func viewerWriteAllowed(p string) bool {
 	return false
 }
 
+// Deployers can drive a project's lifecycle but cannot read credentials,
+// source, backups, files or change project configuration.
+var deployerWrites = []*regexp.Regexp{
+	regexp.MustCompile(`^/projects/[^/]+/deploy$`),
+	regexp.MustCompile(`^/projects/[^/]+/restart$`),
+	regexp.MustCompile(`^/projects/[^/]+/stop$`),
+	regexp.MustCompile(`^/projects/[^/]+/start$`),
+	regexp.MustCompile(`^/projects/[^/]+/rollback$`),
+}
+
+func deployerWriteAllowed(p string) bool {
+	for _, re := range deployerWrites {
+		if re.MatchString(p) {
+			return true
+		}
+	}
+	return false
+}
+
 var viewerPaths = []*regexp.Regexp{
 	regexp.MustCompile(`^/me$`),
 	regexp.MustCompile(`^/servers$`),

@@ -543,10 +543,12 @@ func (s *Server) panelRole(r *http.Request) string {
 	if tok := bearer(r); tok != "" {
 		if t, err := s.st.GetAPITokenByHash(tokenHash(tok)); err == nil {
 			s.touchAPIToken(t.ID)
-			if t.Role == "admin" {
-				return "admin"
+			switch t.Role {
+			case "admin", "deployer":
+				return t.Role
+			default:
+				return "viewer"
 			}
-			return "viewer"
 		}
 	}
 	c, err := r.Cookie("phleet_session")
@@ -558,10 +560,12 @@ func (s *Server) panelRole(r *http.Request) string {
 	}
 	if id, ok := s.sessionUserID(c.Value); ok {
 		if u, err := s.st.GetUser(id); err == nil && !u.Disabled {
-			if u.Role == "admin" {
-				return "admin"
+			switch u.Role {
+			case "admin", "deployer":
+				return u.Role
+			default:
+				return "viewer"
 			}
-			return "viewer"
 		}
 	}
 	return ""
@@ -603,9 +607,15 @@ func (s *Server) requirePanelAuth(next http.Handler) http.Handler {
 					writeJSON(w, http.StatusForbidden, map[string]any{"error": "endpoint requires an admin token"})
 					return
 				}
-			} else if !isUser || !viewerWriteAllowed(r.URL.Path) {
-				writeJSON(w, http.StatusForbidden, map[string]any{"error": "read-only account"})
-				return
+			} else {
+				allowed := isUser && viewerWriteAllowed(r.URL.Path)
+				if role == "deployer" && deployerWriteAllowed(r.URL.Path) {
+					allowed = true
+				}
+				if !allowed {
+					writeJSON(w, http.StatusForbidden, map[string]any{"error": "this token cannot perform that action"})
+					return
+				}
 			}
 		}
 		next.ServeHTTP(w, r)
