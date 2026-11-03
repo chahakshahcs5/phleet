@@ -32,14 +32,18 @@ const (
 var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 type AppSpec struct {
-	Name         string            `json:"name"`
-	Slug         string            `json:"slug"`
-	Kind         string            `json:"kind,omitempty"`
-	Addon        bool              `json:"addon,omitempty"`
-	Embedded     bool              `json:"embedded,omitempty"`
-	Role         string            `json:"role,omitempty"`
-	Epoch        int               `json:"epoch,omitempty"`
-	Port         int               `json:"port"`
+	Name     string `json:"name"`
+	Slug     string `json:"slug"`
+	Kind     string `json:"kind,omitempty"`
+	Addon    bool   `json:"addon,omitempty"`
+	Embedded bool   `json:"embedded,omitempty"`
+	Role     string `json:"role,omitempty"`
+	Epoch    int    `json:"epoch,omitempty"`
+	Port     int    `json:"port"`
+	// InternalPort is the loopback port the app binds to. The public Port is
+	// owned by the agent's switchboard proxy, which lets a new release become
+	// healthy before the old one is stopped.
+	InternalPort int               `json:"internalPort,omitempty"`
 	StartCmd     string            `json:"startCmd"`
 	HealthPath   string            `json:"healthPath"`
 	HealthCmd    string            `json:"healthCmd,omitempty"`
@@ -71,10 +75,39 @@ type appProcess struct {
 	deploying bool
 	logPath   string
 	startedAt time.Time
+	proxy     *appProxy
 }
 
 func (a *Agent) appBase(slug string) string {
 	return filepath.Join(a.home, "apps", slug)
+}
+
+func isAddonSpec(spec AppSpec) bool {
+	if spec.Addon {
+		return true
+	}
+	switch spec.Kind {
+	case "database", "cache", "objectstore", "file":
+		return true
+	}
+	return false
+}
+
+func appPort(spec AppSpec) int {
+	if spec.InternalPort > 0 {
+		return spec.InternalPort
+	}
+	return spec.Port
+}
+
+// internalPorts live above the public app/addon ranges and alternate so a new
+// release can run beside the old one during a blue-green deploy.
+func internalPort(public int, alternate bool) int {
+	p := public + 16000
+	if alternate {
+		p += 1000
+	}
+	return p
 }
 
 func (a *Agent) appPIDPath(slug string) string {
@@ -262,8 +295,21 @@ func (a *Agent) restoreApps() {
 // agent is killed, and /proc/net/tcp is not readable there, so the pidfile plus
 // the process working directory are the reliable evidence.
 func (a *Agent) adoptRunning(p *appProcess, spec AppSpec) bool {
-	if spec.Embedded || spec.Port <= 0 || !portListening(spec.Port) {
+	if spec.Embedded || spec.Port <= 0 || !portListening(appPort(spec)) {
 		return false
+	}
+	if !isAddonSpec(spec) {
+		if spec.InternalPort == 0 {
+			spec.InternalPort = internalPort(spec.Port, false)
+		}
+		if p.proxy == nil {
+			proxy, err := newAppProxy(spec.Port)
+			if err != nil {
+				return false
+			}
+			p.proxy = proxy
+		}
+		p.proxy.setTarget(spec.InternalPort)
 	}
 	pid := readPIDFile(a.appPIDPath(spec.Slug))
 	if pid > 0 && !processMatchesDir(pid, spec.ReleaseDir) {
@@ -305,7 +351,18 @@ func (a *Agent) startApp(spec AppSpec) error {
 
 func (a *Agent) startProcess(p *appProcess, spec AppSpec) error {
 	a.stopProcess(p)
+	if err := a.spawnProcess(p, spec); err != nil {
+		return err
+	}
+	if p.proxy != nil && !isAddonSpec(spec) {
+		p.proxy.setTarget(appPort(spec))
+	}
+	return nil
+}
 
+// spawnProcess starts a process without stopping the current one. It is used
+// by blue-green deploy to bring the new release up beside the old release.
+func (a *Agent) spawnProcess(p *appProcess, spec AppSpec) error {
 	if strings.TrimSpace(spec.StartCmd) == "" {
 		// Embedded engines (SQLite) have no process. They are "running" once
 		// their file exists; the provisioning step owns the health check.
@@ -332,7 +389,26 @@ func (a *Agent) startProcess(p *appProcess, spec AppSpec) error {
 	if _, err := os.Stat(spec.ReleaseDir); err != nil {
 		return fmt.Errorf("release directory missing: %w", err)
 	}
-	if err := a.ensurePortFree(context.Background(), spec.Port, spec.ReleaseDir, 3*time.Second); err != nil {
+	listenPort := spec.Port
+	if !isAddonSpec(spec) {
+		if spec.InternalPort == 0 {
+			spec.InternalPort = internalPort(spec.Port, false)
+		}
+		if p.proxy == nil {
+			proxy, err := newAppProxy(spec.Port)
+			if err != nil {
+				return err
+			}
+			p.proxy = proxy
+		}
+		// Blue-green starts the new backend before the switch. Only point the
+		// proxy at this port when it is the first backend or the same one.
+		if cur := p.proxy.currentTarget(); cur == 0 || cur == spec.InternalPort {
+			p.proxy.setTarget(spec.InternalPort)
+		}
+		listenPort = spec.InternalPort
+	}
+	if err := a.ensurePortFree(context.Background(), listenPort, spec.ReleaseDir, 3*time.Second); err != nil {
 		return err
 	}
 	base := a.appBase(spec.Slug)
@@ -561,7 +637,7 @@ func (a *Agent) rollbackApp(slug string) error {
 	}
 	a.swapCurrent(spec.Slug, next.ReleaseDir)
 	a.saveApps()
-	if err := waitHealthy(context.Background(), next.Port, next.HealthPath, 30*time.Second, func() bool {
+	if err := waitHealthy(context.Background(), appPort(next), next.HealthPath, 30*time.Second, func() bool {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		return p.cmd != nil
@@ -579,6 +655,10 @@ func (a *Agent) deleteApp(slug string) error {
 		return nil
 	}
 	a.stopProcess(p)
+	if p.proxy != nil {
+		p.proxy.close()
+		p.proxy = nil
+	}
 	a.appsMu.Lock()
 	delete(a.apps, slug)
 	a.appsMu.Unlock()
@@ -891,7 +971,7 @@ func appEnv(spec AppSpec) []string {
 	// port on Wi-Fi too, which contradicts "phones never accept inbound".
 	// Users who explicitly want LAN access can override HOST in project env.
 	env = append(env,
-		"PORT="+fmt.Sprint(spec.Port),
+		"PORT="+fmt.Sprint(appPort(spec)),
 		"HOST=127.0.0.1",
 		"NODE_ENV=production",
 		"PHLEET_APP="+spec.Slug,

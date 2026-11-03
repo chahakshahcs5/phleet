@@ -155,11 +155,12 @@ deploy button / API
         └─▶ agent executes a self-contained plan
               ├─ shallow git clone into ~/apps/<slug>/releases/<timestamp>
               ├─ build command (optional) with streamed output
-              ├─ stop the previous process, verify the port is free
-              ├─ start via supervisor with PORT + env
+              ├─ start the new release on an alternate internal port
               ├─ health check (process alive + TCP + HTTP path)
+              ├─ switch the public-port loopback proxy to the new backend
               ├─ symlink current → release, keep 5 releases
-              └─ on failure: restart the previous release, mark rolled_back
+              ├─ drain the old backend for 30 s, then stop it
+              └─ on failure: keep the old backend serving, mark rolled_back
 ```
 
 Source can be a git repository or an uploaded zip. Uploads are stored under `<data>/bundles/<project>.zip`; the

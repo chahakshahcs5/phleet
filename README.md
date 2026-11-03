@@ -52,7 +52,8 @@ standbys all work.
 | Stacks | One project with multiple services; each service gets its own subdomain, port, process, health check and logs, with shared repo/env and private `127.0.0.1` service URLs |
 | Addons | 19 engines — relational databases, caches, queues, search, metrics, logs, notifications, Git and backend services — installed and supervised on a phone; standalone or created with a project; injected env, relay for other phones, PC bridge, SQL console, chunked backups, standbys, manual promotion and opt-in automatic failover |
 | UI | Light theme by default, with a theme studio: Light / Dark / Match-system, 8 accent presets, custom primary and secondary colors, persisted per browser |
-| Scheduling | 1–5 replicas per project, label selectors, pinned phones, health-based placement, automatic failover, manual rebalance |
+| Scheduling | 1-5 replicas per project, label selectors, pinned phones, health-based placement, automatic failover, manual rebalance |
+| Zero-downtime | The agent holds the public port with a loopback switchboard; a new release starts on an alternate internal port, becomes healthy, then traffic switches before the old release is drained |
 | Routing | `<slug>.<domain>` round-robins across running replicas through the agent tunnels; drained/offline replicas are skipped |
 | Env | Per-project variables, encrypted at rest with AES-256-GCM, injected into every replica |
 | Domains | Optional custom hostname per project/service; point a proxied CNAME at the tunnel and set it under Project → Settings |
@@ -183,9 +184,13 @@ Open **Projects → New project**. Choose the source:
 
 Builds inherit the runtime environment, including `NODE_ENV=production`. Pass `--include=dev` (or set `NPM_CONFIG_PRODUCTION=false`) when a build needs devDependencies such as `tsc` or Vite.
 
-Deploying runs entirely on the phone: download/clone → build → stop old release → start new → health check →
-symlink `current` → keep five releases. If the new release fails its check, the previous one is restarted and the
-deployment is marked `rolled_back`. A phone that reboots re-supervises its apps from `~/.phleet/apps.json`.
+Deploying runs entirely on the phone: download/clone → build → start the new release on an alternate internal port →
+health check → switch the public-port switchboard → symlink `current` → drain and stop the old release → keep five
+releases. The public port never closes, so new HTTP/WebSocket connections go to the healthy release. Existing
+long-lived connections on the old release get a 30-second drain. If the new release fails its check, the old release
+keeps serving and the deployment is marked `rolled_back`. The first deploy after upgrading from an older agent briefly
+restarts the app once to move it behind the switchboard. A phone that reboots re-supervises its apps from
+`~/.phleet/apps.json`.
 
 Uploaded projects can replace their source later under **Project → Settings → Source** (upload a new folder, then
 Deploy). Source archives are capped at 64 MB; empty directories are not preserved.

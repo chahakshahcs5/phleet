@@ -165,7 +165,7 @@ func (a *Agent) handleDeploy(ctx context.Context, req agentproto.DeployRequest, 
 	}
 
 	status("starting", "")
-	logf("starting process on port %d", req.Port)
+	logf("starting process on public port %d", req.Port)
 
 	// Capture the previous spec before startProcess replaces it.
 	p.mu.Lock()
@@ -188,6 +188,72 @@ func (a *Agent) handleDeploy(ctx context.Context, req agentproto.DeployRequest, 
 		DeployStatus: "starting",
 		UpdatedAt:    time.Now().Unix(),
 	}
+	if !isAddonSpec(spec) {
+		if prev.InternalPort > 0 && p.proxy != nil && p.proxy.currentTarget() > 0 {
+			alternate := prev.InternalPort == internalPort(req.Port, false)
+			spec.InternalPort = internalPort(req.Port, alternate)
+		} else {
+			spec.InternalPort = internalPort(req.Port, false)
+		}
+	}
+
+	// Blue-green: keep the old release serving on the public port, start the
+	// new release on an alternate internal port, health-check it, then switch.
+	if !isAddonSpec(spec) && prev.InternalPort > 0 && p.proxy != nil && p.cmd != nil {
+		pNew := &appProcess{proxy: p.proxy}
+		pNew.mu.Lock()
+		pNew.deploying = true
+		pNew.mu.Unlock()
+		failNew := func(msg string) {
+			a.stopProcess(pNew)
+			pNew.mu.Lock()
+			pNew.deploying = false
+			pNew.mu.Unlock()
+			a.setDeployState(slug, req.DeploymentID, "rolled_back")
+			status("rolled_back", msg)
+			logf("new release failed; the previous release is still serving: %s", msg)
+		}
+		if err := a.spawnProcess(pNew, spec); err != nil {
+			failNew("could not start process: " + err.Error())
+			return
+		}
+		status("health_check", "")
+		if err := waitHealthy(ctx, appPort(spec), req.HealthPath, healthTimeout, func() bool {
+			pNew.mu.Lock()
+			defer pNew.mu.Unlock()
+			return pNew.cmd != nil
+		}); err != nil {
+			failNew("health check failed: " + err.Error())
+			return
+		}
+		logf("health check passed on internal port %d; switching", spec.InternalPort)
+		p.proxy.setTarget(spec.InternalPort)
+		a.swapCurrent(slug, releaseDir)
+		a.pruneReleases(slug, req.KeepReleases)
+		pNew.mu.Lock()
+		pNew.deploying = false
+		pNew.spec.DeployStatus = "active"
+		pNew.spec.DeploymentID = req.DeploymentID
+		pNew.spec.UpdatedAt = time.Now().Unix()
+		pNew.mu.Unlock()
+		a.appsMu.Lock()
+		a.apps[slug] = pNew
+		a.appsMu.Unlock()
+		a.saveApps()
+		status("active", "")
+		logf("deployed %s (%s) without dropping new requests", slug, releaseID)
+		// Drain existing connections for a short window, then stop the old
+		// release. New connections already go to the new backend.
+		go func() {
+			select {
+			case <-time.After(30 * time.Second):
+			case <-a.ctx.Done():
+			}
+			a.stopProcess(p)
+		}()
+		return
+	}
+
 	a.stopProcess(p)
 	if err := a.startProcess(p, spec); err != nil {
 		a.failDeploy(p, prev, req, "could not start process: "+err.Error(), logf, status)
@@ -201,7 +267,7 @@ func (a *Agent) handleDeploy(ctx context.Context, req agentproto.DeployRequest, 
 		defer p.mu.Unlock()
 		return p.cmd != nil
 	}
-	if err := waitHealthy(ctx, req.Port, healthPath, healthTimeout, alive); err != nil {
+	if err := waitHealthy(ctx, appPort(spec), healthPath, healthTimeout, alive); err != nil {
 		logf("health check failed: %s", err)
 		a.stopProcess(p)
 		a.failDeploy(p, prev, req, "health check failed: "+err.Error(), logf, status)
@@ -241,7 +307,7 @@ func (a *Agent) restorePrevious(p *appProcess, prev AppSpec, deploymentID string
 		logf("rollback failed: %s", err)
 		return false
 	}
-	if err := waitHealthy(context.Background(), prev.Port, prev.HealthPath, 30*time.Second, func() bool {
+	if err := waitHealthy(context.Background(), appPort(prev), prev.HealthPath, 30*time.Second, func() bool {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		return p.cmd != nil
