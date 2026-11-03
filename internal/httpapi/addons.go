@@ -1756,6 +1756,46 @@ func (s *Server) handleAddonBackupUpload(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, 200, map[string]any{"ok": true, "bytes": info.Size()})
 }
 
+func (s *Server) handleVerifyBackup(w http.ResponseWriter, r *http.Request) {
+	a, err := s.st.GetAddon(r.PathValue("id"))
+	if err != nil {
+		apiErr(w, 404, err)
+		return
+	}
+	b, err := s.st.GetBackup(r.PathValue("backupId"))
+	if err != nil || b.AddonID != a.ID {
+		apiErr(w, 404, errors.New("backup not found"))
+		return
+	}
+	if b.Status != "complete" || b.Path == "" {
+		apiErr(w, 409, errors.New("this backup is not complete"))
+		return
+	}
+	if !s.hub.Online(a.PinnedServer) {
+		apiErr(w, 409, errors.New("the phone hosting this database is offline"))
+		return
+	}
+	creds, err := s.decryptAddonCreds(a)
+	if err != nil {
+		apiErr(w, 500, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Minute)
+	defer cancel()
+	_, err = s.hub.Call(ctx, a.PinnedServer, agentproto.TypeAddonVerify, agentproto.AddonVerifyRequest{
+		AddonID: a.ID, Slug: a.Slug, BackupID: b.ID, Engine: a.Engine,
+		DownloadPath: "/api/addons/" + a.ID + "/backups/" + b.ID + "/download",
+		Checksum:     b.Checksum,
+		Port:         a.Port, User: creds.User, Password: creds.Password, Database: creds.Database,
+	})
+	if err != nil {
+		apiErr(w, 409, err)
+		return
+	}
+	_ = s.st.AddEvent("ui", "addon.verify", a.ID, "backup "+b.ID[:8])
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
 func (s *Server) handleAddonBackupDownload(w http.ResponseWriter, r *http.Request) {
 	a, err := s.st.GetAddon(r.PathValue("id"))
 	if err != nil {

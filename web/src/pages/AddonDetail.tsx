@@ -189,6 +189,9 @@ export default function AddonDetail() {
       qc.invalidateQueries({ queryKey: ['addon', id] })
     },
   })
+  const verify = useMutation({
+    mutationFn: (backupId: string) => api.verifyAddonBackup(id, backupId),
+  })
   const run = useMutation({
     mutationFn: () => api.addonQuery(id, consoleInput),
     onSuccess: (res) => {
@@ -675,6 +678,14 @@ export default function AddonDetail() {
                             <Button
                               size="sm"
                               variant="ghost"
+                              disabled={b.status !== 'complete' || !online || verify.isPending}
+                              onClick={() => verify.mutate(b.id)}
+                            >
+                              Verify
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
                               disabled={b.status !== 'complete' || !online || restore.isPending}
                               onClick={() => setRestoreId(b.id)}
                             >
@@ -688,6 +699,8 @@ export default function AddonDetail() {
                 </table>
               </div>
             )}
+            {verify.isSuccess ? <div className="px-4 pb-3 text-[11px] text-emerald-300">Backup verified.</div> : null}
+            {verify.isError ? <div className="px-4 pb-3 text-[11px] text-red-400">{String(verify.error)}</div> : null}
             {restore.isError ? <div className="px-4 pb-3 text-[11px] text-red-400">{String(restore.error)}</div> : null}
           </Card>
         ) : null}

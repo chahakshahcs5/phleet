@@ -36,6 +36,7 @@ const (
 	TypeAddonControl   = "addon.control"
 	TypeAddonBackup    = "addon.backup"
 	TypeAddonRestore   = "addon.restore"
+	TypeAddonVerify    = "addon.verify"
 	TypeAddonEvent     = "addon.event"
 	TypeAddonRelay     = "addon.relay"
 	TypeAddonPromote   = "addon.promote"
@@ -407,6 +408,20 @@ type AddonRestoreRequest struct {
 
 // AddonEvent streams provisioning, backup and restore progress back to the
 // control plane. Phase is log or status.
+// AddonVerifyRequest checks a backup without restoring it.
+type AddonVerifyRequest struct {
+	AddonID      string `json:"addonId"`
+	Slug         string `json:"slug"`
+	BackupID     string `json:"backupId"`
+	Engine       string `json:"engine"`
+	DownloadPath string `json:"downloadPath"`
+	Checksum     string `json:"checksum,omitempty"`
+	Port         int    `json:"port"`
+	User         string `json:"user"`
+	Password     string `json:"password"`
+	Database     string `json:"database"`
+}
+
 type AddonEvent struct {
 	AddonID  string `json:"addonId"`
 	BackupID string `json:"backupId,omitempty"`

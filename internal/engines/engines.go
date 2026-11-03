@@ -368,6 +368,28 @@ func BackupExt(id string) string {
 	}
 }
 
+// VerifyCommand returns an engine-native integrity check for a downloaded
+// backup file. It never connects to the live data directory.
+func VerifyCommand(engineID string, p Params, path string) string {
+	f := shq(path)
+	switch strings.ToLower(engineID) {
+	case "postgres":
+		return "pg_restore --list " + f + " >/dev/null"
+	case "redis":
+		return "redis-check-rdb " + f
+	case "sqlite":
+		return "sqlite3 " + f + " 'PRAGMA quick_check;' | grep -qx ok"
+	case "mariadb":
+		return "grep -q 'CREATE TABLE' " + f
+	case "influxdb", "rclone", "mosquitto", "nats", "victoriametrics", "victorialogs", "ntfy", "pocketbase", "etcd", "meilisearch", "prometheus", "gitea", "beanstalkd":
+		return "tar -tzf " + f + " >/dev/null"
+	case "duckdb":
+		return "test -s " + f
+	default:
+		return "test -s " + f
+	}
+}
+
 // ---- helpers ----
 
 func shq(s string) string {

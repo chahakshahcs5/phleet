@@ -149,6 +149,24 @@ func TestServiceEngines(t *testing.T) {
 	}
 }
 
+func TestVerifyCommands(t *testing.T) {
+	p := Params{}
+	cases := map[string]string{
+		"postgres": "pg_restore --list",
+		"redis":    "redis-check-rdb",
+		"sqlite":   "quick_check",
+		"rclone":   "tar -tzf",
+	}
+	for engine, want := range cases {
+		if got := VerifyCommand(engine, p, "/tmp/dump"); !strings.Contains(got, want) {
+			t.Fatalf("%s verify = %q, want %q", engine, got, want)
+		}
+	}
+	if got := VerifyCommand("unknown", p, "/tmp/dump"); !strings.Contains(got, "test -s") {
+		t.Fatalf("fallback verify = %q", got)
+	}
+}
+
 func TestServiceCatalogue(t *testing.T) {
 	for _, id := range []string{"filebrowser", "memos", "gotify", "microbin", "navidrome", "syncthing", "vikunja", "miniflux"} {
 		e, ok := Get(id)

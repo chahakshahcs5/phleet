@@ -279,6 +279,7 @@ func (s *Server) routes() {
 	api.HandleFunc("POST /addons/{id}/backup", s.handleCreateBackup)
 	api.HandleFunc("GET /addons/{id}/backups", s.handleListBackups)
 	api.HandleFunc("POST /addons/{id}/restore", s.handleRestoreBackup)
+	api.HandleFunc("POST /addons/{id}/backups/{backupId}/verify", s.handleVerifyBackup)
 
 	api.HandleFunc("GET /alerts", s.handleListAlerts)
 	api.HandleFunc("GET /alerts/count", s.handleAlertCount)

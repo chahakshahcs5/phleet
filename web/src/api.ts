@@ -278,6 +278,8 @@ export const api = {
   addonBackups: (id: string) => request<{ backups: Backup[] }>(`/api/addons/${id}/backups`),
   createAddonBackup: (id: string) =>
     request<{ backup: Backup }>(`/api/addons/${id}/backup`, { method: 'POST' }),
+  verifyAddonBackup: (id: string, backupId: string) =>
+    request<{ ok: boolean }>(`/api/addons/${id}/backups/${backupId}/verify`, { method: 'POST' }),
   restoreAddonBackup: (id: string, backupId: string) =>
     request<{ ok: boolean }>(`/api/addons/${id}/restore`, {
       method: 'POST',

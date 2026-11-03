@@ -574,6 +574,16 @@ func (a *Agent) dispatch(ctx context.Context, env agentproto.Envelope) {
 			return
 		}
 		go a.handleAddonRestore(req, a.addonEmitter())
+	case agentproto.TypeAddonVerify:
+		var req agentproto.AddonVerifyRequest
+		if err := json.Unmarshal(env.Data, &req); err != nil {
+			a.fail(env, err)
+			return
+		}
+		go func() {
+			err := a.handleAddonVerify(req)
+			a.complete(env, agentproto.Empty{}, err)
+		}()
 	case agentproto.TypeAddonRelay:
 		var req agentproto.AddonRelaySpec
 		if err := json.Unmarshal(env.Data, &req); err != nil {

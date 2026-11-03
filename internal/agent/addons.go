@@ -599,6 +599,48 @@ func (a *Agent) handleAddonBackup(req agentproto.AddonBackupRequest, emit func(a
 	logf("backup complete")
 }
 
+// handleAddonVerify downloads a backup to the state directory, checks its
+// checksum and runs an engine-native integrity command. It never touches the
+// live addon data directory.
+func (a *Agent) handleAddonVerify(req agentproto.AddonVerifyRequest) error {
+	eng, ok := engines.Get(req.Engine)
+	if !ok {
+		return errors.New("unknown engine")
+	}
+	dest := filepath.Join(a.cfg.StateDir, "tmp", "verify-"+req.BackupID+backupExt(eng))
+	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, 20*time.Minute)
+	defer cancel()
+	a.addonMu.Lock()
+	defer a.addonMu.Unlock()
+	if err := a.downloadFile(ctx, req.DownloadPath, dest); err != nil {
+		return fmt.Errorf("download failed: %w", err)
+	}
+	defer os.Remove(dest)
+	if req.Checksum != "" {
+		sum, err := fileSHA256(dest)
+		if err != nil || !strings.EqualFold(sum, req.Checksum) {
+			return errors.New("backup checksum mismatch")
+		}
+	}
+	params := engines.Params{
+		Port: req.Port, User: req.User, Password: req.Password, Database: req.Database,
+	}
+	cmd := exec.CommandContext(ctx, a.shPath, "-c", engines.VerifyCommand(eng.ID, params, dest))
+	cmd.Env = os.Environ()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			return fmt.Errorf("verify failed: %w: %s", err, msg)
+		}
+		return fmt.Errorf("verify failed: %w", err)
+	}
+	return nil
+}
+
 func (a *Agent) handleAddonRestore(req agentproto.AddonRestoreRequest, emit func(agentproto.AddonEvent)) {
 	eng, ok := engines.Get(req.Engine)
 	if !ok {
