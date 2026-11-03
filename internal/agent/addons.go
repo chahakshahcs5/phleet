@@ -615,10 +615,10 @@ func (a *Agent) handleAddonVerify(req agentproto.AddonVerifyRequest) error {
 	defer cancel()
 	a.addonMu.Lock()
 	defer a.addonMu.Unlock()
+	defer os.Remove(dest)
 	if err := a.downloadFile(ctx, req.DownloadPath, dest); err != nil {
 		return fmt.Errorf("download failed: %w", err)
 	}
-	defer os.Remove(dest)
 	if req.Checksum != "" {
 		sum, err := fileSHA256(dest)
 		if err != nil || !strings.EqualFold(sum, req.Checksum) {
