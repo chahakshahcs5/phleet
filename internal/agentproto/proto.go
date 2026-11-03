@@ -396,6 +396,7 @@ type AddonRestoreRequest struct {
 	BackupID     string `json:"backupId"`
 	Engine       string `json:"engine"`
 	DownloadPath string `json:"downloadPath"`
+	Checksum     string `json:"checksum,omitempty"` // SHA-256 of the backup file
 	DataDir      string `json:"dataDir"`
 	File         string `json:"file,omitempty"`
 	Port         int    `json:"port"`

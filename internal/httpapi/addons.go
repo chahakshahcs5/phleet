@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -1581,6 +1582,19 @@ func (s *Server) backupPath(a model.Addon, backupID string) string {
 	return filepath.Join(s.cfg.DataDir, "backups", a.ID, backupID+ext)
 }
 
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 func (s *Server) startAddonBackup(a model.Addon) (model.Backup, error) {
 	if !s.hub.Online(a.PinnedServer) {
 		return model.Backup{}, errors.New("the phone hosting this database is offline")
@@ -1726,7 +1740,14 @@ func (s *Server) handleAddonBackupUpload(w http.ResponseWriter, r *http.Request)
 		apiErr(w, 500, err)
 		return
 	}
+	checksum, hashErr := fileSHA256(dest)
+	if hashErr != nil {
+		s.log.Warn("hash backup", "backup", b.ID, "err", hashErr)
+	}
 	_ = s.st.FinishBackup(b.ID, "complete", info.Size(), dest, "")
+	if checksum != "" {
+		_ = s.st.SetBackupChecksum(b.ID, checksum)
+	}
 	if removed, err := s.st.PruneBackups(a.ID, 10); err == nil {
 		for _, old := range removed {
 			if old.Path != "" && old.Path != dest {
@@ -1767,6 +1788,9 @@ func (s *Server) handleAddonBackupDownload(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", "attachment; filename="+b.ID+engines.BackupExt(a.Engine))
 	w.Header().Set("Cache-Control", "no-store")
+	if b.Checksum != "" {
+		w.Header().Set("X-Checksum-Sha256", b.Checksum)
+	}
 	http.ServeContent(w, r, b.ID, st.ModTime(), f)
 }
 
@@ -1818,6 +1842,7 @@ func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
 	req := agentproto.AddonRestoreRequest{
 		AddonID: a.ID, Slug: a.Slug, BackupID: b.ID, Engine: a.Engine,
 		DownloadPath: "/api/addons/" + a.ID + "/backups/" + b.ID + "/download",
+		Checksum:     b.Checksum,
 		DataDir:      a.DataDir, File: addonFile(a), Port: a.Port,
 		User: creds.User, Password: creds.Password, Database: creds.Database,
 	}

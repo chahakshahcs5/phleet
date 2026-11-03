@@ -4,6 +4,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -647,6 +649,13 @@ func (a *Agent) handleAddonRestore(req agentproto.AddonRestoreRequest, emit func
 		return
 	}
 	defer os.Remove(dest)
+	if req.Checksum != "" {
+		sum, err := fileSHA256(dest)
+		if err != nil || !strings.EqualFold(sum, req.Checksum) {
+			fail("backup checksum mismatch; refusing to restore")
+			return
+		}
+	}
 
 	a.addonMu.Lock()
 	defer a.addonMu.Unlock()
@@ -871,6 +880,19 @@ func (a *Agent) uploadFile(ctx context.Context, apiPath, src string) error {
 		}
 	}
 	return nil
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func (a *Agent) downloadFile(ctx context.Context, apiPath, dest string) error {

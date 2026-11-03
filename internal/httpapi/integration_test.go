@@ -2,6 +2,8 @@ package httpapi_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1208,6 +1210,10 @@ func TestChunkedBackupUpload(t *testing.T) {
 	b, err := h.store.GetBackup("b-chunk")
 	if err != nil || b.Status != "complete" || b.Size != 11 || b.Path == "" {
 		t.Fatalf("backup not finalised: %+v %v", b, err)
+	}
+	sum := sha256.Sum256([]byte("hello world"))
+	if b.Checksum != hex.EncodeToString(sum[:]) {
+		t.Fatalf("backup checksum = %q", b.Checksum)
 	}
 	code, data := h.doRaw(t, http.MethodGet, "/api/addons/a-chunk/backups/b-chunk/download", nil)
 	if code != 200 || string(data) != "hello world" {

@@ -451,17 +451,17 @@ func (s *Store) CreateBackup(b model.Backup) error {
 	if b.Status == "" {
 		b.Status = "running"
 	}
-	_, err := s.db.Exec(`INSERT INTO backups (id,addon_id,server_id,kind,status,size,path,error,created_at,finished_at)
-VALUES (?,?,?,?,?,?,?,?,?,?)`,
-		b.ID, b.AddonID, b.ServerID, b.Kind, b.Status, b.Size, b.Path, b.Error, b.CreatedAt, b.FinishedAt)
+	_, err := s.db.Exec(`INSERT INTO backups (id,addon_id,server_id,kind,status,size,checksum,path,error,created_at,finished_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		b.ID, b.AddonID, b.ServerID, b.Kind, b.Status, b.Size, b.Checksum, b.Path, b.Error, b.CreatedAt, b.FinishedAt)
 	return err
 }
 
-const backupCols = `id,addon_id,server_id,kind,status,size,path,error,created_at,finished_at`
+const backupCols = `id,addon_id,server_id,kind,status,size,checksum,path,error,created_at,finished_at`
 
 func (s *Store) scanBackup(row interface{ Scan(...any) error }) (model.Backup, error) {
 	var b model.Backup
-	err := row.Scan(&b.ID, &b.AddonID, &b.ServerID, &b.Kind, &b.Status, &b.Size, &b.Path, &b.Error, &b.CreatedAt, &b.FinishedAt)
+	err := row.Scan(&b.ID, &b.AddonID, &b.ServerID, &b.Kind, &b.Status, &b.Size, &b.Checksum, &b.Path, &b.Error, &b.CreatedAt, &b.FinishedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return b, ErrNotFound
 	}
@@ -490,6 +490,11 @@ func (s *Store) ListBackups(addonID string, limit int) ([]model.Backup, error) {
 		out = append(out, b)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) SetBackupChecksum(id, checksum string) error {
+	_, err := s.db.Exec(`UPDATE backups SET checksum=? WHERE id=?`, checksum, id)
+	return err
 }
 
 func (s *Store) FinishBackup(id, status string, size int64, path, errMsg string) error {

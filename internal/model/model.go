@@ -179,6 +179,7 @@ type Backup struct {
 	Kind       string `json:"kind"`
 	Status     string `json:"status"`
 	Size       int64  `json:"size"`
+	Checksum   string `json:"checksum,omitempty"`
 	Path       string `json:"-"`
 	Error      string `json:"error,omitempty"`
 	CreatedAt  int64  `json:"createdAt"`

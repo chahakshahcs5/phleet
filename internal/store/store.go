@@ -233,6 +233,7 @@ CREATE TABLE IF NOT EXISTS backups (
   kind        TEXT NOT NULL DEFAULT 'manual',
   status      TEXT NOT NULL DEFAULT 'running',
   size        INTEGER NOT NULL DEFAULT 0,
+  checksum    TEXT NOT NULL DEFAULT '',
   path        TEXT NOT NULL DEFAULT '',
   error       TEXT NOT NULL DEFAULT '',
   created_at  INTEGER NOT NULL,
@@ -309,6 +310,7 @@ func Open(path string) (*Store, error) {
 		{"addons", "app_id", "TEXT NOT NULL DEFAULT ''"},
 		{"addons", "version", "TEXT NOT NULL DEFAULT ''"},
 		{"addon_placements", "lag_ms", "INTEGER NOT NULL DEFAULT 0"},
+		{"backups", "checksum", "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, m := range migrations {
 		if err := ensureColumn(db, m.table, m.column, m.decl); err != nil {
