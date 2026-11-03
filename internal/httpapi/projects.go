@@ -486,12 +486,17 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 500, err)
 		return
 	}
+	admin := s.panelRole(r) == "admin"
 	out := make([]projectView, 0, len(projects))
 	for _, p := range projects {
 		if p.ParentID != "" {
 			continue
 		}
-		out = append(out, s.buildProjectView(p, false))
+		v := s.buildProjectView(p, false)
+		if !admin {
+			redactProjectRepo(&v)
+		}
+		out = append(out, v)
 	}
 	writeJSON(w, 200, map[string]any{"projects": out})
 }
@@ -803,7 +808,21 @@ func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 404, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"project": s.buildProjectView(p, true)})
+	admin := s.panelRole(r) == "admin"
+	v := s.buildProjectView(p, admin)
+	if !admin {
+		redactProjectRepo(&v)
+	}
+	writeJSON(w, 200, map[string]any{"project": v})
+}
+
+func redactProjectRepo(v *projectView) {
+	// Repository URLs sometimes carry credentials; never expose them to a
+	// read-only API token. Stack children inherit the parent repo.
+	v.Repo = ""
+	for i := range v.Services {
+		redactProjectRepo(&v.Services[i])
+	}
 }
 
 func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {

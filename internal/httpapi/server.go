@@ -49,6 +49,9 @@ type Server struct {
 	deviceMu      sync.Mutex
 	pendingDevice map[string]string
 
+	apiUseMu sync.Mutex
+	apiUse   map[string]time.Time
+
 	tunnel *tunnelManager
 
 	bridges *tcpBridge
@@ -64,6 +67,7 @@ func New(cfg *config.Config, st *store.Store, log *slog.Logger) *Server {
 		recAt:         map[string]time.Time{},
 		offlineTimers: map[string]*time.Timer{},
 		pendingDevice: map[string]string{},
+		apiUse:        map[string]time.Time{},
 		reconcileCh:   make(chan struct{}, 1),
 		tunnel:        newTunnelManager(cfg, log),
 	}
@@ -191,6 +195,9 @@ func (s *Server) routes() {
 	api.HandleFunc("GET /events", s.handleEvents)
 	api.HandleFunc("GET /events/facets", s.handleEventFacets)
 	api.HandleFunc("GET /jobs/{id}", s.handleGetJob)
+	api.HandleFunc("GET /api-tokens", s.handleListAPITokens)
+	api.HandleFunc("POST /api-tokens", s.handleCreateAPIToken)
+	api.HandleFunc("DELETE /api-tokens/{id}", s.handleDeleteAPIToken)
 	api.HandleFunc("GET /setup", s.handleSetupInfo)
 	api.HandleFunc("GET /servers", s.handleListServers)
 	api.HandleFunc("POST /servers/provision", s.handleProvisionServer)
@@ -372,6 +379,18 @@ func tokenHash(v string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func (s *Server) touchAPIToken(id string) {
+	s.apiUseMu.Lock()
+	last := s.apiUse[id]
+	if time.Since(last) < time.Minute {
+		s.apiUseMu.Unlock()
+		return
+	}
+	s.apiUse[id] = time.Now()
+	s.apiUseMu.Unlock()
+	go func() { _ = s.st.TouchAPIToken(id) }()
+}
+
 // agentServerAuthed verifies the per-device token for one server. An empty
 // hash means the phone has not enrolled yet and still uses the shared token.
 func (s *Server) agentServerAuthed(tok, serverID string) bool {
@@ -456,7 +475,7 @@ func (s *Server) adoptPendingDeviceToken(serverID string) {
 // still accepted when no server header is present (or the phone has not
 // enrolled yet).
 func (s *Server) agentHTTPAuthed(r *http.Request) bool {
-	if s.panelAuthed(r) {
+	if s.panelRole(r) == "admin" {
 		return true
 	}
 	tok := bearer(r)
@@ -470,22 +489,49 @@ func (s *Server) agentHTTPAuthed(r *http.Request) bool {
 	return s.agentServerAuthed(tok, serverID)
 }
 
-func (s *Server) panelAuthed(r *http.Request) bool {
+func (s *Server) panelRole(r *http.Request) string {
 	if s.adminTokenAuthed(r) {
-		return true
+		return "admin"
+	}
+	if tok := bearer(r); tok != "" {
+		if t, err := s.st.GetAPITokenByHash(tokenHash(tok)); err == nil {
+			s.touchAPIToken(t.ID)
+			if t.Role == "admin" {
+				return "admin"
+			}
+			return "viewer"
+		}
 	}
 	c, err := r.Cookie("phleet_session")
 	if err != nil {
-		return false
+		return ""
 	}
-	return s.validSession(c.Value)
+	if s.validSession(c.Value) {
+		return "admin"
+	}
+	return ""
+}
+
+func (s *Server) panelAuthed(r *http.Request) bool {
+	return s.panelRole(r) != ""
 }
 
 func (s *Server) requirePanelAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.panelAuthed(r) {
+		role := s.panelRole(r)
+		if role == "" {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
+		}
+		if role != "admin" {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				writeJSON(w, http.StatusForbidden, map[string]any{"error": "read-only API token"})
+				return
+			}
+			if !viewerPathAllowed(r.URL.Path) {
+				writeJSON(w, http.StatusForbidden, map[string]any{"error": "endpoint requires an admin token"})
+				return
+			}
 		}
 		next.ServeHTTP(w, r)
 	})

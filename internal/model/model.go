@@ -187,6 +187,16 @@ type Backup struct {
 	FinishedAt int64  `json:"finishedAt"`
 }
 
+// APIToken is a scoped bearer credential for automation. The raw token is
+// returned once and only its hash is stored.
+type APIToken struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Role       string `json:"role"`
+	CreatedAt  int64  `json:"createdAt"`
+	LastUsedAt int64  `json:"lastUsedAt"`
+}
+
 // Job is a long-running control-plane operation (currently onboarding). The
 // UI polls it instead of holding an HTTP request open across a package install.
 type Job struct {

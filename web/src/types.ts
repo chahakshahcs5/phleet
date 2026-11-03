@@ -414,6 +414,14 @@ export interface ProvisionResult {
   jobId?: string
 }
 
+export interface APIToken {
+  id: string
+  name: string
+  role: 'admin' | 'viewer'
+  createdAt: number
+  lastUsedAt: number
+}
+
 export interface Job {
   id: string
   kind: string

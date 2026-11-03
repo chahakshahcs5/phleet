@@ -226,6 +226,15 @@ CREATE TABLE IF NOT EXISTS addon_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_addon_logs ON addon_logs(addon_id, id);
 
+CREATE TABLE IF NOT EXISTS api_tokens (
+  id           TEXT PRIMARY KEY,
+  name         TEXT NOT NULL,
+  role         TEXT NOT NULL DEFAULT 'viewer',
+  token_hash   TEXT NOT NULL UNIQUE,
+  created_at   INTEGER NOT NULL,
+  last_used_at INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS jobs (
   id         TEXT PRIMARY KEY,
   kind       TEXT NOT NULL,

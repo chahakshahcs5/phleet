@@ -1,5 +1,6 @@
 import type {
   Addon,
+  APIToken,
   AddonConnection,
   AddonLog,
   Alert,
@@ -145,6 +146,13 @@ export const api = {
     async?: boolean
   }) => request<ProvisionResult>('/api/servers/provision', { method: 'POST', body: JSON.stringify(body) }),
   job: (id: string) => request<{ job: Job }>(`/api/jobs/${id}`),
+  apiTokens: () => request<{ tokens: APIToken[] }>('/api/api-tokens'),
+  createAPIToken: (body: { name: string; role: 'admin' | 'viewer' }) =>
+    request<{ token: string; apiToken: APIToken }>('/api/api-tokens', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  deleteAPIToken: (id: string) => request<{ ok: boolean }>(`/api/api-tokens/${id}`, { method: 'DELETE' }),
 
   projects: () => request<{ projects: ProjectView[] }>('/api/projects'),
   project: (id: string) => request<{ project: ProjectView }>(`/api/projects/${id}`),

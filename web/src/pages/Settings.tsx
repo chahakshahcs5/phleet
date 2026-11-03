@@ -1,7 +1,8 @@
-import { useQuery } from '@tanstack/react-query'
-import { Cloud, KeyRound, Palette, Server, Shield, Smartphone, TerminalSquare } from 'lucide-react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Cloud, KeyRound, Palette, Server, Shield, Smartphone, TerminalSquare, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { api } from '../api'
+import type { APIToken } from '../types'
 import ThemeToggle from '../components/ThemeToggle'
 import ThemeStudio from '../components/ThemeStudio'
 import TunnelCard from '../components/TunnelCard'
@@ -9,9 +10,28 @@ import { Badge, Button, Card, KeyValue } from '../components/ui'
 
 export default function Settings() {
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const qc = useQueryClient()
   const [studioOpen, setStudioOpen] = useState(false)
+  const [tokenName, setTokenName] = useState('')
+  const [tokenRole, setTokenRole] = useState<'admin' | 'viewer'>('viewer')
+  const [createdToken, setCreatedToken] = useState('')
   const base = me.data?.publicUrl || 'https://fleet.example.com'
   const dataDir = me.data?.dataDir || '%ProgramData%\\phleet'
+
+  const tokens = useQuery({ queryKey: ['api-tokens'], queryFn: api.apiTokens })
+  const createToken = useMutation({
+    mutationFn: () => api.createAPIToken({ name: tokenName.trim(), role: tokenRole }),
+    onSuccess: (res) => {
+      setCreatedToken(res.token)
+      setTokenName('')
+      qc.invalidateQueries({ queryKey: ['api-tokens'] })
+    },
+  })
+  const deleteToken = useMutation({
+    mutationFn: (id: string) => api.deleteAPIToken(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['api-tokens'] }),
+  })
+  const tokenList: APIToken[] = tokens.data?.tokens ?? []
 
   return (
     <div className="mx-auto max-w-4xl space-y-4 px-4 py-6 md:px-8 md:py-8">
@@ -61,6 +81,97 @@ export default function Settings() {
           Tokens are generated once and never leave the host through the API. Rotate by deleting the file and restarting
           phleetd — every agent must be re-bootstrapped afterwards.
         </p>
+      </Card>
+
+      <Card className="p-4">
+        <div className="flex items-center gap-2 text-[10px] font-medium tracking-widest text-zinc-500 uppercase">
+          <KeyRound size={12} /> API tokens
+        </div>
+        <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
+          Viewer tokens can read fleet, project and alert data but cannot mutate anything or read credentials,
+          source archives, backups or file contents. Admin tokens have the same access as the admin token.
+        </p>
+        <div className="mt-3 flex flex-wrap items-end gap-2">
+          <label className="flex-1">
+            <span className="text-[10px] text-zinc-500">Name</span>
+            <input
+              className="mt-1 h-9 w-full rounded-lg border border-zinc-800 bg-zinc-950/70 px-3 text-xs text-zinc-200 outline-none focus:border-emerald-400/40"
+              value={tokenName}
+              onChange={(e) => setTokenName(e.target.value)}
+              placeholder="monitoring"
+            />
+          </label>
+          <label>
+            <span className="text-[10px] text-zinc-500">Role</span>
+            <select
+              className="mt-1 h-9 rounded-lg border border-zinc-800 bg-zinc-950/70 px-3 text-xs text-zinc-200 outline-none"
+              value={tokenRole}
+              onChange={(e) => setTokenRole(e.target.value as 'admin' | 'viewer')}
+            >
+              <option value="viewer">viewer</option>
+              <option value="admin">admin</option>
+            </select>
+          </label>
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={!tokenName.trim() || createToken.isPending}
+            onClick={() => {
+              setCreatedToken('')
+              createToken.mutate()
+            }}
+          >
+            Create token
+          </Button>
+        </div>
+        {createToken.isError ? (
+          <div className="mt-2 text-[11px] text-red-400">{String(createToken.error)}</div>
+        ) : null}
+        {createdToken ? (
+          <div className="mt-3 rounded-lg border border-amber-900/40 bg-amber-500/5 p-3">
+            <div className="text-[10px] text-amber-300">Copy this token now; it is shown once.</div>
+            <code className="mt-1 block break-all font-mono text-[10px] text-amber-200">{createdToken}</code>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="mt-2"
+              onClick={() => navigator.clipboard?.writeText(createdToken)}
+            >
+              Copy
+            </Button>
+          </div>
+        ) : null}
+        <div className="mt-3 divide-y divide-zinc-800/60">
+          {tokenList.map((t) => (
+            <div key={t.id} className="flex items-center justify-between gap-3 py-2">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 text-[11px] text-zinc-300">
+                  <span className="truncate">{t.name}</span>
+                  <Badge tone={t.role === 'admin' ? 'warn' : 'neutral'}>{t.role}</Badge>
+                </div>
+                <div className="mt-0.5 text-[10px] text-zinc-600">
+                  created {new Date(t.createdAt * 1000).toLocaleDateString()}
+                  {t.lastUsedAt ? ` · last used ${new Date(t.lastUsedAt * 1000).toLocaleDateString()}` : ' · never used'}
+                </div>
+              </div>
+              <Button
+                size="icon"
+                variant="ghost"
+                title="Revoke token"
+                disabled={deleteToken.isPending}
+                onClick={() => deleteToken.mutate(t.id)}
+              >
+                <Trash2 size={12} />
+              </Button>
+            </div>
+          ))}
+          {tokenList.length === 0 ? (
+            <div className="py-3 text-[11px] text-zinc-600">No scoped tokens yet.</div>
+          ) : null}
+        </div>
+        {deleteToken.isError ? (
+          <div className="mt-2 text-[11px] text-red-400">{String(deleteToken.error)}</div>
+        ) : null}
       </Card>
 
       <TunnelCard />
@@ -133,7 +244,8 @@ export default function Settings() {
           </p>
           <p className="flex items-start gap-2">
             <Server size={12} className="mt-0.5 shrink-0 text-zinc-500" />
-            One agent token covers the fleet today. Use per-device tokens before sharing the panel with other people.
+            The shared agent token is only an enrollment token; phones receive a per-device token on first connect.
+            Scoped API tokens above can be revoked at any time.
           </p>
         </div>
       </Card>

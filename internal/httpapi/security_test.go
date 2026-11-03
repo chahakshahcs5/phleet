@@ -187,6 +187,43 @@ func TestPerDeviceAgentEnrollment(t *testing.T) {
 	}
 }
 
+func TestViewerAPITokenIsReadOnly(t *testing.T) {
+	s := testServer(t)
+	if err := s.st.CreateAPIToken(model.APIToken{
+		ID: "viewer-token", Name: "watcher", Role: "viewer",
+	}, tokenHash("viewer-secret")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.st.CreateAPIToken(model.APIToken{
+		ID: "admin-token", Name: "automation", Role: "admin",
+	}, tokenHash("admin-secret")); err != nil {
+		t.Fatal(err)
+	}
+	call := func(method, path, token string) int {
+		req := httptest.NewRequest(method, path, strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rr, req)
+		return rr.Code
+	}
+	if code := call(http.MethodGet, "/api/projects", "viewer-secret"); code != http.StatusOK {
+		t.Fatalf("viewer read = %d", code)
+	}
+	if code := call(http.MethodPost, "/api/projects", "viewer-secret"); code != http.StatusForbidden {
+		t.Fatalf("viewer mutation = %d", code)
+	}
+	if code := call(http.MethodGet, "/api/setup", "viewer-secret"); code != http.StatusForbidden {
+		t.Fatalf("viewer secret endpoint = %d", code)
+	}
+	if code := call(http.MethodGet, "/api/api-tokens", "viewer-secret"); code != http.StatusForbidden {
+		t.Fatalf("viewer token list = %d", code)
+	}
+	if code := call(http.MethodGet, "/api/projects", "admin-secret"); code != http.StatusOK {
+		t.Fatalf("admin API token read = %d", code)
+	}
+}
+
 func TestMetricsRequiresPanelAuth(t *testing.T) {
 	s := testServer(t)
 	rr := httptest.NewRecorder()
