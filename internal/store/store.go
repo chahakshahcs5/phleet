@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS servers (
   labels        TEXT NOT NULL DEFAULT '{}',
   status        TEXT NOT NULL DEFAULT 'offline',
   drain         INTEGER NOT NULL DEFAULT 0,
+  device_token_hash TEXT NOT NULL DEFAULT '',
   last_seen     INTEGER NOT NULL DEFAULT 0,
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS metrics (
   uptime      INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_metrics_server_ts ON metrics(server_id, ts);
+CREATE INDEX IF NOT EXISTS idx_metrics_ts ON metrics(ts);
 
 CREATE TABLE IF NOT EXISTS events (
   id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -290,6 +292,7 @@ func Open(path string) (*Store, error) {
 		{"placements", "desired", "TEXT NOT NULL DEFAULT 'running'"},
 		{"deployments", "release", "TEXT NOT NULL DEFAULT ''"},
 		{"servers", "drain", "INTEGER NOT NULL DEFAULT 0"},
+		{"servers", "device_token_hash", "TEXT NOT NULL DEFAULT ''"},
 		{"projects", "source_type", "TEXT NOT NULL DEFAULT 'git'"},
 		{"projects", "source_size", "INTEGER NOT NULL DEFAULT 0"},
 		{"projects", "source_updated_at", "INTEGER NOT NULL DEFAULT 0"},
@@ -349,6 +352,20 @@ func ensureColumn(db *sql.DB, table, column, decl string) error {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) DB() *sql.DB { return s.db }
+
+// Backup writes a consistent snapshot of the database using SQLite's VACUUM
+// INTO. It is safe to run against the live database; WAL readers still see a
+// coherent state.
+func (s *Store) Backup(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	_ = os.Remove(path)
+	// VACUUM INTO does not accept a bound parameter on all SQLite builds.
+	quoted := "'" + strings.ReplaceAll(path, "'", "''") + "'"
+	_, err := s.db.Exec(`VACUUM INTO ` + quoted)
+	return err
+}
 
 func now() int64 { return time.Now().Unix() }
 
@@ -412,6 +429,28 @@ func (s *Store) UpdateServerMeta(id, name string, labels map[string]string) erro
 	return err
 }
 
+// GetServerDeviceHash returns the hash of the per-device agent token. An empty
+// hash means the phone is still using the shared enrollment token.
+func (s *Store) GetServerDeviceHash(id string) (string, error) {
+	var hash string
+	err := s.db.QueryRow(`SELECT device_token_hash FROM servers WHERE id=?`, id).Scan(&hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return hash, err
+}
+
+func (s *Store) SetServerDeviceHash(id, hash string) error {
+	res, err := s.db.Exec(`UPDATE servers SET device_token_hash=?, updated_at=? WHERE id=?`, hash, now(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) SetServerDrain(id string, drain bool) error {
 	v := 0
 	if drain {
@@ -422,13 +461,22 @@ func (s *Store) SetServerDrain(id string, drain bool) error {
 }
 
 func (s *Store) DeleteServer(id string) error {
-	if _, err := s.db.Exec(`DELETE FROM servers WHERE id=?`, id); err != nil {
+	tx, err := s.db.Begin()
+	if err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`DELETE FROM metrics WHERE server_id=?`, id); err != nil {
-		return err
+	defer tx.Rollback()
+	for _, q := range []string{
+		`DELETE FROM placements WHERE server_id=?`,
+		`DELETE FROM addon_relays WHERE server_id=?`,
+		`DELETE FROM metrics WHERE server_id=?`,
+		`DELETE FROM servers WHERE id=?`,
+	} {
+		if _, err := tx.Exec(q, id); err != nil {
+			return err
+		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) ListServers() ([]model.Server, error) {
@@ -565,8 +613,22 @@ func (s *Store) PruneMetrics(cutoff int64) error {
 }
 
 func (s *Store) AddEvent(actor, action, target, detail string) error {
+	// Audit rows are user-visible and searchable; keep them bounded. Exec
+	// commands and error strings can be large, so trim here rather than in
+	// every caller.
+	const maxDetail = 2000
+	if len(detail) > maxDetail {
+		detail = detail[:maxDetail] + "…"
+	}
 	_, err := s.db.Exec(`INSERT INTO events (ts,actor,action,target,detail) VALUES (?,?,?,?,?)`,
 		now(), actor, action, target, detail)
+	return err
+}
+
+// PruneEvents keeps the audit log bounded. Metrics and deployment history are
+// pruned separately; without this the events table grows forever.
+func (s *Store) PruneEvents(cutoff int64) error {
+	_, err := s.db.Exec(`DELETE FROM events WHERE ts < ?`, cutoff)
 	return err
 }
 

@@ -334,7 +334,7 @@ func (s *Server) uniqueAddonSlug(name string) (string, error) {
 		if i > 1 {
 			candidate = fmt.Sprintf("%s-%d", base, i)
 		}
-		if _, err := s.st.GetAddonBySlug(candidate); errors.Is(err, store.ErrNotFound) {
+		if !s.workloadSlugExists(candidate) {
 			return candidate, nil
 		}
 	}
@@ -356,7 +356,7 @@ func (s *Server) uniqueServiceSlug(name string) (string, error) {
 		if i > 1 {
 			candidate = fmt.Sprintf("%s-%d", base, i)
 		}
-		if _, err := s.st.GetAddonBySlug(candidate); errors.Is(err, store.ErrNotFound) {
+		if !s.workloadSlugExists(candidate) {
 			return candidate, nil
 		}
 	}
@@ -755,6 +755,10 @@ func (s *Server) createAddon(w http.ResponseWriter, r *http.Request, service boo
 		apiErr(w, 400, err)
 		return
 	}
+	// Hold the allocator lock until the placement row exists, so a concurrent
+	// project or addon cannot choose the same port.
+	s.portMu.Lock()
+	defer s.portMu.Unlock()
 	port := 0
 	if !eng.Embedded {
 		port, err = s.allocatePort(serverID)
@@ -1052,6 +1056,8 @@ func (s *Server) handleAddStandby(w http.ResponseWriter, r *http.Request) {
 		}
 		a.EnvEnc = enc
 	}
+	s.portMu.Lock()
+	defer s.portMu.Unlock()
 	port, err := s.allocatePort(serverID)
 	if err != nil {
 		apiErr(w, 409, err)
@@ -1476,9 +1482,13 @@ func (s *Server) handleDeleteAddonPlacement(w http.ResponseWriter, r *http.Reque
 	}
 	keep := truthy(r.URL.Query().Get("keep"))
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-	_, _ = s.hub.Call(ctx, serverID, agentproto.TypeAddonControl,
+	_, callErr := s.hub.Call(ctx, serverID, agentproto.TypeAddonControl,
 		agentproto.AddonControlRequest{AddonID: a.ID, Slug: a.Slug, Action: "delete", PurgeData: !keep})
 	cancel()
+	if callErr != nil && !strings.Contains(callErr.Error(), "not installed") {
+		apiErr(w, http.StatusBadGateway, fmt.Errorf("could not remove the copy on %s: %w", serverID, callErr))
+		return
+	}
 	_ = s.hub.Send(serverID, agentproto.TypeAddonRelay,
 		agentproto.AddonRelaySpec{AddonID: a.ID, Action: "stop"})
 	_ = s.st.DeleteAddonRelay(a.ID, serverID)
@@ -1550,6 +1560,22 @@ func (s *Server) handleUnbindAddon(w http.ResponseWriter, r *http.Request) {
 
 // ---- backups ----
 
+func (s *Server) addonOnServer(addonID, serverID string) bool {
+	if serverID == "" {
+		return false
+	}
+	placements, err := s.st.ListAddonPlacements(addonID)
+	if err != nil {
+		return false
+	}
+	for _, pl := range placements {
+		if pl.ServerID == serverID {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) backupPath(a model.Addon, backupID string) string {
 	ext := engines.BackupExt(a.Engine)
 	return filepath.Join(s.cfg.DataDir, "backups", a.ID, backupID+ext)
@@ -1614,6 +1640,10 @@ func (s *Server) handleAddonBackupUpload(w http.ResponseWriter, r *http.Request)
 	b, err := s.st.GetBackup(r.PathValue("backupId"))
 	if err != nil || b.AddonID != a.ID {
 		apiErr(w, 404, errors.New("backup not found"))
+		return
+	}
+	if !s.panelAuthed(r) && !s.addonOnServer(a.ID, r.Header.Get("X-Phleet-Server")) {
+		apiErr(w, http.StatusForbidden, errors.New("this phone does not host that addon"))
 		return
 	}
 	offset := int64(0)
@@ -1717,6 +1747,10 @@ func (s *Server) handleAddonBackupDownload(w http.ResponseWriter, r *http.Reques
 	b, err := s.st.GetBackup(r.PathValue("backupId"))
 	if err != nil || b.AddonID != a.ID || b.Path == "" {
 		apiErr(w, 404, errors.New("backup not found"))
+		return
+	}
+	if !s.panelAuthed(r) && !s.addonOnServer(a.ID, r.Header.Get("X-Phleet-Server")) {
+		apiErr(w, http.StatusForbidden, errors.New("this phone does not host that addon"))
 		return
 	}
 	f, err := os.Open(b.Path)
@@ -1888,10 +1922,13 @@ func (s *Server) handleAddonQuery(w http.ResponseWriter, r *http.Request) {
 
 // ---- heartbeat + reconcile helpers ----
 
-func (s *Server) syncAddonStatus(serverID string, app agentproto.AppStatus) {
+func (s *Server) syncAddonStatus(serverID string, app agentproto.AppStatus) (bool, error) {
 	a, err := s.st.GetAddonBySlug(app.Slug)
 	if err != nil {
-		return
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return true, err
 	}
 	placements, _ := s.st.ListAddonPlacements(a.ID)
 	var mine *model.AddonPlacement
@@ -1909,7 +1946,7 @@ func (s *Server) syncAddonStatus(serverID string, app agentproto.AppStatus) {
 		last, seen := s.orphans[key]
 		if seen && time.Since(last) < 10*time.Minute {
 			s.orphanMu.Unlock()
-			return
+			return true, nil
 		}
 		s.orphans[key] = time.Now()
 		s.orphanMu.Unlock()
@@ -1919,7 +1956,7 @@ func (s *Server) syncAddonStatus(serverID string, app agentproto.AppStatus) {
 			_, _ = s.hub.Call(ctx, serverID, agentproto.TypeAddonControl,
 				agentproto.AddonControlRequest{AddonID: a.ID, Slug: a.Slug, Action: "delete"})
 		}()
-		return
+		return true, nil
 	}
 	// A phone that was fenced by a promotion can never keep serving writes.
 	// Its agent reports the old epoch; stop it and mark the placement demoted.
@@ -1931,7 +1968,7 @@ func (s *Server) syncAddonStatus(serverID string, app agentproto.AppStatus) {
 			_ = s.st.AddAddonLog(a.ID, fmt.Sprintf("fenced stale primary on %s (epoch %d < %d)", serverID, app.Epoch, a.Epoch))
 			_ = s.st.AddEvent("scheduler", "addon.fenced", a.ID, serverID)
 		}
-		return
+		return true, nil
 	}
 	if mine.Status != app.State || mine.PID != app.PID || mine.Restarts != app.Restarts {
 		_ = s.st.UpdateAddonPlacementStatus(a.ID, serverID, app.State, app.PID, app.Restarts, app.LastError)
@@ -1958,13 +1995,13 @@ func (s *Server) syncAddonStatus(serverID string, app agentproto.AppStatus) {
 	// A standby or a demoted old primary reports its own state; it must not
 	// overwrite the status of the primary that the panel and alerts follow.
 	if mine.Role != "" && mine.Role != "primary" {
-		return
+		return true, nil
 	}
 	// Never downgrade an in-flight operation from a heartbeat. Embedded
 	// engines report "running" with no process, so a heartbeat would otherwise
 	// end a restore before the file is copied.
 	if a.Status == "provisioning" || a.Status == "restoring" {
-		return
+		return true, nil
 	}
 	status := app.State
 	switch app.State {
@@ -1976,6 +2013,7 @@ func (s *Server) syncAddonStatus(serverID string, app agentproto.AppStatus) {
 	if status != "" && status != a.Status {
 		_ = s.st.SetAddonStatus(a.ID, status, app.LastError)
 	}
+	return true, nil
 }
 
 // injectAddonEnv merges bound addon connection details into a deploy plan. It

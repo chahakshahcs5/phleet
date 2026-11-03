@@ -8,6 +8,7 @@ import "encoding/json"
 
 const (
 	TypeHello        = "hello"
+	TypeHelloAck     = "hello.ack"
 	TypeHeartbeat    = "heartbeat"
 	TypeExec         = "exec"
 	TypePTYOpen      = "pty.open"
@@ -67,6 +68,14 @@ type Hello struct {
 	Home         string         `json:"home"`
 	User         string         `json:"user"`
 	Caps         map[string]any `json:"caps"`
+}
+
+// HelloAck is sent after a successful hello. Token is set when the control
+// plane enrolls the phone (or rotates a legacy shared token); it is the
+// per-device credential the agent must use for every later connection.
+type HelloAck struct {
+	Token string `json:"token,omitempty"`
+	OK    bool   `json:"ok"`
 }
 
 type Heartbeat struct {
@@ -273,6 +282,8 @@ type DeployEvent struct {
 	Status       string `json:"status,omitempty"`
 	Line         string `json:"line,omitempty"`
 	Error        string `json:"error,omitempty"`
+	Release      string `json:"release,omitempty"`
+	Commit       string `json:"commit,omitempty"`
 }
 
 type AppLogsRequest struct {

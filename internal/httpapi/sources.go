@@ -108,6 +108,10 @@ func (s *Server) handleDownloadSource(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 404, err)
 		return
 	}
+	if !s.panelAuthed(r) && !s.projectSourceOnServer(p, r.Header.Get("X-Phleet-Server")) {
+		apiErr(w, http.StatusForbidden, errors.New("this phone is not running that project"))
+		return
+	}
 	path := s.sourceBundlePath(p.ID)
 	f, err := os.Open(path)
 	if err != nil {

@@ -32,12 +32,13 @@ import (
 )
 
 type Config struct {
-	URL      string
-	Token    string
-	Name     string
-	ID       string
-	StateDir string
-	Roots    []string
+	URL       string
+	Token     string
+	TokenPath string
+	Name      string
+	ID        string
+	StateDir  string
+	Roots     []string
 }
 
 type Agent struct {
@@ -93,6 +94,11 @@ type Agent struct {
 
 	lastCPMu sync.Mutex
 	lastCP   time.Time
+
+	tokenMu   sync.RWMutex
+	token     string
+	tokenPath string
+	helloAck  chan struct{}
 }
 
 func New(cfg Config, log *slog.Logger) (*Agent, error) {
@@ -129,15 +135,22 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 	if path := os.Getenv("PATH"); !strings.Contains(path, binDir) {
 		_ = os.Setenv("PATH", binDir+string(os.PathListSeparator)+path)
 	}
+	tokenPath := cfg.TokenPath
+	if tokenPath == "" {
+		tokenPath = filepath.Join(cfg.StateDir, "agent.token")
+	}
 	a := &Agent{
-		cfg:      cfg,
-		home:     home,
-		roots:    roots,
-		log:      log,
-		sessions: map[string]*ptySession{},
-		apps:     map[string]*appProcess{},
-		appsPath: filepath.Join(cfg.StateDir, "apps.json"),
-		relays:   map[string]*relayListener{},
+		cfg:       cfg,
+		home:      home,
+		roots:     roots,
+		log:       log,
+		sessions:  map[string]*ptySession{},
+		apps:      map[string]*appProcess{},
+		appsPath:  filepath.Join(cfg.StateDir, "apps.json"),
+		relays:    map[string]*relayListener{},
+		token:     cfg.Token,
+		tokenPath: tokenPath,
+		helloAck:  make(chan struct{}, 1),
 	}
 	if a.cfg.ID == "" {
 		a.cfg.ID = loadID(cfg.StateDir)
@@ -204,6 +217,36 @@ func loadID(dir string) string {
 
 func (a *Agent) ID() string { return a.cfg.ID }
 
+func (a *Agent) currentToken() string {
+	a.tokenMu.RLock()
+	defer a.tokenMu.RUnlock()
+	return a.token
+}
+
+func (a *Agent) setToken(tok string) {
+	if strings.TrimSpace(tok) == "" {
+		return
+	}
+	a.tokenMu.Lock()
+	a.token = tok
+	a.tokenMu.Unlock()
+	tmp := a.tokenPath + ".tmp"
+	if err := os.WriteFile(tmp, []byte(tok+"\n"), 0o600); err != nil {
+		a.log.Warn("save device token", "err", err)
+		return
+	}
+	if err := os.Rename(tmp, a.tokenPath); err != nil {
+		a.log.Warn("replace device token", "err", err)
+	}
+}
+
+func (a *Agent) signalHelloAck() {
+	select {
+	case a.helloAck <- struct{}{}:
+	default:
+	}
+}
+
 // Run connects and reconnects until ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) error {
 	a.ctx = ctx
@@ -250,7 +293,7 @@ func (a *Agent) connect(ctx context.Context) error {
 	ws, resp, err := websocket.Dial(dctx, a.cfg.URL, &websocket.DialOptions{
 		HTTPClient: a.httpClient,
 		HTTPHeader: http.Header{
-			"Authorization": []string{"Bearer " + a.cfg.Token},
+			"Authorization": []string{"Bearer " + a.currentToken()},
 			"User-Agent":    []string{"phleet-agent/" + config.Version},
 		},
 	})
@@ -358,6 +401,14 @@ func (a *Agent) reply(env agentproto.Envelope, data any, err error) {
 
 func (a *Agent) dispatch(ctx context.Context, env agentproto.Envelope) {
 	switch env.Type {
+	case agentproto.TypeHelloAck:
+		var ack agentproto.HelloAck
+		if err := json.Unmarshal(env.Data, &ack); err == nil && ack.OK {
+			if ack.Token != "" {
+				a.setToken(ack.Token)
+			}
+			a.signalHelloAck()
+		}
 	case agentproto.TypeExec:
 		var req agentproto.ExecRequest
 		if err := json.Unmarshal(env.Data, &req); err != nil {
@@ -640,9 +691,9 @@ func (a *Agent) sendHeartbeat() {
 	hb := agentproto.Heartbeat{
 		Metrics: m,
 		Apps:    a.appStatuses(),
-		// Capabilities are small; send them every beat so a tool installed on the
-		// phone shows up within one probe instead of waiting for a reconnect.
-		Caps: a.capsSnapshot(),
+		// Send capabilities only when they change. The control plane otherwise
+		// rewrites the same JSON several times a minute per phone.
+		Caps: a.capsIfChanged(),
 	}
 	if err := a.send(agentproto.TypeHeartbeat, "", hb); err != nil {
 		a.log.Debug("heartbeat failed", "err", err)
@@ -717,8 +768,9 @@ func (a *Agent) exec(req agentproto.ExecRequest) (agentproto.ExecResponse, error
 	defer cancel()
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, a.shPath, "-c", req.Command)
+	prepareCommandGroup(cmd)
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "TERM=dumb", "CI=1")
+	cmd.Env = append(sanitizeEnv(os.Environ()), "TERM=dumb", "CI=1")
 	out, err := cmd.CombinedOutput()
 	res := agentproto.ExecResponse{
 		Output:   string(out),
@@ -814,6 +866,8 @@ func probeCaps() map[string]any {
 		"chargeControl": fileExists("/sys/class/power_supply/battery/input_current_limit"),
 		"cpus":          runtime.NumCPU(),
 		"home":          home,
+		// The agent understands hello.ack and can persist a per-device token.
+		"deviceTokens": true,
 	}
 }
 
@@ -941,6 +995,24 @@ func (a *Agent) processMap() map[int]string {
 func killProcessGroup(pid int) {
 	_ = syscall.Kill(-pid, syscall.SIGKILL)
 	_ = syscall.Kill(pid, syscall.SIGKILL)
+}
+
+// prepareCommandGroup makes command timeouts kill the whole tree, not just the
+// shell. Without this a timed-out build leaves npm/node children behind, and a
+// grandchild holding the stdout pipe can keep cmd.Wait blocked past the
+// deadline.
+func prepareCommandGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 5 * time.Second
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err == nil {
+			return nil
+		}
+		return cmd.Process.Kill()
+	}
 }
 
 func sortedKeys(m map[string]bool) []string {

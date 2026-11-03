@@ -106,7 +106,11 @@ func (s *Server) handleProvisionServer(w http.ResponseWriter, r *http.Request) {
 	}
 	args = append(args, target, "bash -s -- "+remoteBootstrapArgs(base, s.cfg.AgentToken, name))
 
-	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Minute)
+	// Do not tie a multi-minute package install to the browser request. A
+	// Cloudflare edge timeout or a closed tab would otherwise kill the SSH
+	// process halfway through the bootstrap. The output is still returned when
+	// the install finishes; a later phase should turn this into a job.
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, sshBin, args...)
 	cmd.Stdin = bytes.NewReader(script)

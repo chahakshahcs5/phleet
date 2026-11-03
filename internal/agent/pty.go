@@ -69,7 +69,7 @@ func (a *Agent) openPTY(req agentproto.PTYOpen) error {
 	}
 	cmd := exec.Command(shell, "-l")
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(sanitizeEnv(os.Environ()),
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
 		"LANG=C.UTF-8",

@@ -219,6 +219,25 @@ func (s *Store) SetProjectDesired(projectID, desired string) error {
 	return err
 }
 
+func (s *Store) ListPlacementsForServer(serverID string) ([]model.Placement, error) {
+	rows, err := s.db.Query(`SELECT project_id,server_id,status,desired,port,pid,restarts,release,last_error,updated_at
+FROM placements WHERE server_id=?`, serverID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.Placement{}
+	for rows.Next() {
+		var p model.Placement
+		if err := rows.Scan(&p.ProjectID, &p.ServerID, &p.Status, &p.Desired, &p.Port, &p.PID, &p.Restarts,
+			&p.Release, &p.LastError, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) ListPlacements() ([]model.Placement, error) {
 	rows, err := s.db.Query(`SELECT project_id,server_id,status,desired,port,pid,restarts,release,last_error,updated_at FROM placements`)
 	if err != nil {
@@ -294,6 +313,11 @@ func (s *Store) CreateDeployment(d model.Deployment) error {
 (id,project_id,server_id,commit_sha,status,release,started_at,finished_at,detail)
 VALUES (?,?,?,?,?,?,?,?,?)`,
 		d.ID, d.ProjectID, d.ServerID, d.CommitSHA, d.Status, d.Release, d.StartedAt, d.FinishedAt, d.Detail)
+	return err
+}
+
+func (s *Store) SetDeploymentCommit(id, commit string) error {
+	_, err := s.db.Exec(`UPDATE deployments SET commit_sha=? WHERE id=?`, commit, id)
 	return err
 }
 

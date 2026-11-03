@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -152,6 +153,9 @@ func janitor(ctx context.Context, st *store.Store, log *slog.Logger) {
 			if err := st.PruneAddonLogs(time.Now().Add(-30 * 24 * time.Hour).Unix()); err != nil {
 				log.Warn("prune addon logs", "err", err)
 			}
+			if err := st.PruneEvents(time.Now().Add(-90 * 24 * time.Hour).Unix()); err != nil {
+				log.Warn("prune events", "err", err)
+			}
 		}
 	}
 }
@@ -210,18 +214,18 @@ func publishAssets(cfg *config.Config, log *slog.Logger) {
 		exeDir = filepath.Dir(exe)
 	}
 
-	const agentName = "phleet-agent-linux-arm64"
-	agentTarget := filepath.Join(cfg.BinDir(), agentName)
-	if _, err := os.Stat(agentTarget); err != nil {
+	for _, agentName := range []string{
+		"phleet-agent-linux-arm64",
+		"phleet-agent-linux-amd64",
+	} {
+		agentTarget := filepath.Join(cfg.BinDir(), agentName)
 		candidates := []string{
 			filepath.Join(exeDir, "bin", agentName),
 			filepath.Join(exeDir, "dist", "bin", agentName),
 			filepath.Join("dist", "bin", agentName),
 		}
-		if copyFirst(agentTarget, candidates) {
+		if copyIfChanged(agentTarget, candidates) {
 			log.Info("published agent binary", "path", agentTarget)
-		} else {
-			log.Info("no agent binary found to publish; run scripts/build.ps1")
 		}
 	}
 
@@ -231,24 +235,27 @@ func publishAssets(cfg *config.Config, log *slog.Logger) {
 		{"bootstrap-debian.sh", "bootstrap-debian-chroot.sh"},
 	} {
 		scriptTarget := filepath.Join(cfg.BinDir(), sc.name)
-		if _, err := os.Stat(scriptTarget); err == nil {
-			continue
-		}
 		scriptCandidates := []string{
 			filepath.Join(exeDir, "scripts", sc.source),
 			filepath.Join(exeDir, "share", sc.name),
 			filepath.Join(exeDir, "bin", sc.name),
 			filepath.Join("scripts", sc.source),
 		}
-		if copyFirst(scriptTarget, scriptCandidates) {
+		if copyIfChanged(scriptTarget, scriptCandidates) {
 			_ = os.Chmod(scriptTarget, 0o755)
 			log.Info("published bootstrap script", "path", scriptTarget)
 		}
 	}
 }
 
-func copyFirst(target string, candidates []string) bool {
+// copyIfChanged refreshes the published asset when the build changed. The old
+// behaviour only copied when the target was missing, so upgrading phleetd left
+// phones downloading the previous agent and bootstrap forever.
+func copyIfChanged(target string, candidates []string) bool {
 	for _, src := range candidates {
+		if sameFile(target, src) {
+			return false
+		}
 		in, err := os.Open(src)
 		if err != nil {
 			continue
@@ -266,4 +273,24 @@ func copyFirst(target string, candidates []string) bool {
 		}
 	}
 	return false
+}
+
+func sameFile(a, b string) bool {
+	sa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	sb, err := os.Stat(b)
+	if err != nil || sa.IsDir() || sb.IsDir() || sa.Size() != sb.Size() {
+		return false
+	}
+	ba, err := os.ReadFile(a)
+	if err != nil {
+		return false
+	}
+	bb, err := os.ReadFile(b)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(ba, bb)
 }

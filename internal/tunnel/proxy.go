@@ -21,7 +21,49 @@ const (
 	maxHeader  = 1 << 20
 	maxBody    = 32 << 20
 	reqTimeout = 5 * time.Minute
+	// idleTimeout is refreshed on every read/write, so a slow but alive
+	// download is not killed at five minutes while a stalled peer is.
+	idleTimeout = 60 * time.Second
 )
+
+type idleReader struct {
+	r    io.Reader
+	set  func(time.Time) error
+	idle time.Duration
+}
+
+func (r *idleReader) Read(p []byte) (int, error) {
+	_ = r.set(time.Now().Add(r.idle))
+	return r.r.Read(p)
+}
+
+type idleWriter struct {
+	w    io.Writer
+	set  func(time.Time) error
+	idle time.Duration
+}
+
+func (w *idleWriter) Write(p []byte) (int, error) {
+	_ = w.set(time.Now().Add(w.idle))
+	return w.w.Write(p)
+}
+
+// idleConn keeps the application socket alive while refreshing its deadline
+// before each operation.
+type idleConn struct {
+	net.Conn
+	idle time.Duration
+}
+
+func (c *idleConn) Read(p []byte) (int, error) {
+	_ = c.Conn.SetReadDeadline(time.Now().Add(c.idle))
+	return c.Conn.Read(p)
+}
+
+func (c *idleConn) Write(p []byte) (int, error) {
+	_ = c.Conn.SetWriteDeadline(time.Now().Add(c.idle))
+	return c.Conn.Write(p)
+}
 
 type RequestHeader struct {
 	// Kind selects the stream mode: "" (HTTP), "tcp" (raw port forward) or
@@ -36,6 +78,9 @@ type RequestHeader struct {
 	ContentLength int64               `json:"contentLength"`
 	RemoteAddr    string              `json:"remoteAddr"`
 	Upgrade       bool                `json:"upgrade,omitempty"`
+	// ProtoScheme is the scheme the browser used (http or https). It lets
+	// LAN-only deployments generate correct absolute URLs.
+	ProtoScheme string `json:"protoScheme,omitempty"`
 }
 
 type ResponseHeader struct {
@@ -217,7 +262,8 @@ func ProxyHTTPOpts(w http.ResponseWriter, r *http.Request, sess *yamux.Session, 
 	defer stream.Close()
 	if upgrade || streaming {
 		// Upgraded and raw-stream connections are long-lived; a wall-clock
-		// deadline would tear them down mid-transfer.
+		// deadline would tear them down mid-transfer. Individual reads and
+		// writes still get an idle deadline below.
 		_ = stream.SetDeadline(time.Time{})
 	} else {
 		_ = stream.SetDeadline(time.Now().Add(reqTimeout))
@@ -235,6 +281,10 @@ func ProxyHTTPOpts(w http.ResponseWriter, r *http.Request, sess *yamux.Session, 
 	if streaming {
 		length = r.ContentLength
 	}
+	proto := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		proto = "https"
+	}
 	hdr := RequestHeader{
 		Port:          port,
 		Method:        r.Method,
@@ -244,12 +294,14 @@ func ProxyHTTPOpts(w http.ResponseWriter, r *http.Request, sess *yamux.Session, 
 		ContentLength: length,
 		RemoteAddr:    r.RemoteAddr,
 		Upgrade:       upgrade,
+		ProtoScheme:   proto,
 	}
 	if err := writeFramed(stream, hdr); err != nil {
 		return err
 	}
 	if streaming && length > 0 {
-		if _, err := io.CopyN(stream, r.Body, length); err != nil {
+		iw := &idleWriter{w: stream, set: stream.SetWriteDeadline, idle: idleTimeout}
+		if _, err := io.CopyN(iw, r.Body, length); err != nil {
 			return err
 		}
 	} else if len(body) > 0 {
@@ -258,9 +310,17 @@ func ProxyHTTPOpts(w http.ResponseWriter, r *http.Request, sess *yamux.Session, 
 		}
 	}
 
+	// The response header should arrive promptly, but the body may stream for
+	// as long as both ends keep making progress.
+	if !upgrade {
+		_ = stream.SetReadDeadline(time.Now().Add(reqTimeout))
+	}
 	var res ResponseHeader
 	if err := readFramed(stream, &res); err != nil {
 		return err
+	}
+	if !upgrade {
+		_ = stream.SetDeadline(time.Time{})
 	}
 	if res.Error != "" {
 		http.Error(w, "app error: "+res.Error, http.StatusBadGateway)
@@ -281,7 +341,8 @@ func ProxyHTTPOpts(w http.ResponseWriter, r *http.Request, sess *yamux.Session, 
 		w.Header().Set("Content-Length", strconv.FormatInt(res.ContentLength, 10))
 	}
 	w.WriteHeader(res.Status)
-	_, err = io.Copy(w, stream)
+	ir := &idleReader{r: stream, set: stream.SetReadDeadline, idle: idleTimeout}
+	_, err = io.Copy(w, ir)
 	return err
 }
 
@@ -423,21 +484,36 @@ func bridgeUpgrade(w http.ResponseWriter, stream *yamux.Stream, res ResponseHead
 // ServeStreams handles streams accepted by the agent-side yamux session.
 // allowedPort must confirm the port belongs to a supervised app.
 func ServeStreams(sess *yamux.Session, allowedPort func(int) bool) {
+	ServeStreamsWithFiles(sess, allowedPort, nil)
+}
+
+// ServeStreamsWithFiles additionally accepts "fs" streams. The callback is
+// responsible for validating the path and writing the response frame plus file
+// bytes; this keeps the control plane's download path out of memory.
+func ServeStreamsWithFiles(sess *yamux.Session, allowedPort func(int) bool, files func(*yamux.Stream, RequestHeader) error) {
 	for {
 		stream, err := sess.AcceptStream()
 		if err != nil {
 			return
 		}
-		go handleStream(stream, allowedPort)
+		go handleStream(stream, allowedPort, files)
 	}
 }
 
-func handleStream(stream *yamux.Stream, allowedPort func(int) bool) {
+func handleStream(stream *yamux.Stream, allowedPort func(int) bool, files func(*yamux.Stream, RequestHeader) error) {
 	defer stream.Close()
 	_ = stream.SetDeadline(time.Now().Add(reqTimeout))
 
 	var req RequestHeader
 	if err := readFramed(stream, &req); err != nil {
+		return
+	}
+	if req.Kind == "fs" {
+		if files == nil {
+			_ = writeFramed(stream, ResponseHeader{Status: 502, Error: "file streaming is not supported by this agent"})
+			return
+		}
+		_ = files(stream, req)
 		return
 	}
 	if req.Port <= 0 || (allowedPort != nil && !allowedPort(req.Port)) {
@@ -465,7 +541,10 @@ func handleStream(stream *yamux.Stream, allowedPort func(int) bool) {
 		handleUpgradeStream(stream, conn, req)
 		return
 	}
-	_ = conn.SetDeadline(time.Now().Add(reqTimeout))
+	// The handshake above is bounded; the body and response are bounded by
+	// inactivity, not by a total wall-clock limit.
+	_ = stream.SetDeadline(time.Time{})
+	ic := &idleConn{Conn: conn, idle: idleTimeout}
 
 	httpReq := &http.Request{
 		Method:        req.Method,
@@ -478,17 +557,22 @@ func handleStream(stream *yamux.Stream, allowedPort func(int) bool) {
 		ContentLength: req.ContentLength,
 	}
 	if req.ContentLength > 0 {
-		httpReq.Body = io.NopCloser(io.LimitReader(stream, req.ContentLength))
+		ir := &idleReader{r: stream, set: stream.SetReadDeadline, idle: idleTimeout}
+		httpReq.Body = io.NopCloser(io.LimitReader(ir, req.ContentLength))
 	}
 	httpReq.Header.Set("X-Forwarded-Host", req.Host)
-	httpReq.Header.Set("X-Forwarded-Proto", "https")
+	proto := req.ProtoScheme
+	if proto == "" {
+		proto = "https"
+	}
+	httpReq.Header.Set("X-Forwarded-Proto", proto)
 	httpReq.Header.Set("X-Real-IP", req.RemoteAddr)
-	if err := httpReq.Write(conn); err != nil {
+	if err := httpReq.Write(ic); err != nil {
 		_ = writeFramed(stream, ResponseHeader{Status: 502, Error: "could not write request"})
 		return
 	}
 
-	br := bufio.NewReader(conn)
+	br := bufio.NewReader(ic)
 	resp, err := http.ReadResponse(br, httpReq)
 	if err != nil {
 		_ = writeFramed(stream, ResponseHeader{Status: 502, Error: "invalid response from app"})
@@ -501,10 +585,13 @@ func handleStream(stream *yamux.Stream, allowedPort func(int) bool) {
 		Headers:       cleanHeaders(resp.Header, ""),
 		ContentLength: resp.ContentLength,
 	}
+	_ = stream.SetWriteDeadline(time.Now().Add(reqTimeout))
 	if err := writeFramed(stream, out); err != nil {
 		return
 	}
-	_, _ = io.Copy(stream, resp.Body)
+	_ = stream.SetWriteDeadline(time.Time{})
+	iw := &idleWriter{w: stream, set: stream.SetWriteDeadline, idle: idleTimeout}
+	_, _ = io.Copy(iw, resp.Body)
 }
 
 // handleTCPStream bridges a tunnel stream to a loopback TCP port. Used by the
@@ -541,7 +628,11 @@ func handleUpgradeStream(stream *yamux.Stream, conn net.Conn, req RequestHeader)
 		ContentLength: 0,
 	}
 	httpReq.Header.Set("X-Forwarded-Host", req.Host)
-	httpReq.Header.Set("X-Forwarded-Proto", "https")
+	proto := req.ProtoScheme
+	if proto == "" {
+		proto = "https"
+	}
+	httpReq.Header.Set("X-Forwarded-Proto", proto)
 	httpReq.Header.Set("X-Real-IP", req.RemoteAddr)
 	if err := httpReq.Write(conn); err != nil {
 		_ = writeFramed(stream, ResponseHeader{Status: 502, Error: "could not write upgrade request"})

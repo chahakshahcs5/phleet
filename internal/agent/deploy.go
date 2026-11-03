@@ -52,8 +52,13 @@ func (a *Agent) handleDeploy(ctx context.Context, req agentproto.DeployRequest, 
 		line := fmt.Sprintf(format, args...)
 		emit(agentproto.DeployEvent{DeploymentID: req.DeploymentID, Phase: "log", Line: line})
 	}
+	releaseID := time.Now().Format("20060102-150405")
+	commitSHA := ""
 	status := func(s, errMsg string) {
-		emit(agentproto.DeployEvent{DeploymentID: req.DeploymentID, Phase: "status", Status: s, Error: errMsg})
+		emit(agentproto.DeployEvent{
+			DeploymentID: req.DeploymentID, Phase: "status", Status: s, Error: errMsg,
+			Release: releaseID, Commit: commitSHA,
+		})
 	}
 	fail := func(msg string) {
 		logf("error: %s", msg)
@@ -80,8 +85,11 @@ func (a *Agent) handleDeploy(ctx context.Context, req agentproto.DeployRequest, 
 	}
 	_ = os.MkdirAll(filepath.Join(base, "shared"), 0o755)
 	_ = os.MkdirAll(filepath.Join(base, "logs"), 0o755)
+	cacheDir := filepath.Join(base, "shared", "cache")
+	for _, d := range []string{"npm", "pnpm", "yarn", "go", "pip", "cargo"} {
+		_ = os.MkdirAll(filepath.Join(cacheDir, d), 0o755)
+	}
 
-	releaseID := time.Now().Format("20060102-150405")
 	releaseDir := filepath.Join(releasesDir, releaseID)
 	ctx, cancel := context.WithTimeout(ctx, deployTimeout)
 	defer cancel()
@@ -128,6 +136,14 @@ func (a *Agent) handleDeploy(ctx context.Context, req agentproto.DeployRequest, 
 			fail("git clone failed: " + err.Error())
 			return
 		}
+		if a.gitPath != "" {
+			if out, err := exec.CommandContext(ctx, a.gitPath, "-C", releaseDir, "rev-parse", "HEAD").Output(); err == nil {
+				commitSHA = strings.TrimSpace(string(out))
+				if commitSHA != "" {
+					logf("commit %s", commitSHA)
+				}
+			}
+		}
 	}
 
 	// Persist the environment for local debugging; the supervisor also injects
@@ -137,7 +153,8 @@ func (a *Agent) handleDeploy(ctx context.Context, req agentproto.DeployRequest, 
 	if strings.TrimSpace(req.BuildCmd) != "" {
 		logf("running build: %s", req.BuildCmd)
 		buildCtx, buildCancel := context.WithTimeout(ctx, 10*time.Minute)
-		err := a.runCommand(buildCtx, releaseDir, a.shPath, []string{"-c", req.BuildCmd}, appEnvForDeploy(req), func(line string) {
+		buildEnv := append(appEnvForDeploy(req), cacheEnv(cacheDir)...)
+		err := a.runCommand(buildCtx, releaseDir, a.shPath, []string{"-c", req.BuildCmd}, buildEnv, func(line string) {
 			logf("build: %s", line)
 		})
 		buildCancel()
@@ -260,6 +277,22 @@ func appEnvForDeploy(req agentproto.DeployRequest) []string {
 	return appEnv(spec)
 }
 
+// cacheEnv points common package managers at a per-project cache in the shared
+// directory. Builds are still isolated in release directories, but dependencies
+// survive from one deploy to the next instead of being downloaded again onto
+// eMMC.
+func cacheEnv(dir string) []string {
+	return []string{
+		"XDG_CACHE_HOME=" + dir,
+		"npm_config_cache=" + filepath.Join(dir, "npm"),
+		"PNPM_STORE_DIR=" + filepath.Join(dir, "pnpm"),
+		"YARN_CACHE_FOLDER=" + filepath.Join(dir, "yarn"),
+		"GOCACHE=" + filepath.Join(dir, "go"),
+		"PIP_CACHE_DIR=" + filepath.Join(dir, "pip"),
+		"CARGO_HOME=" + filepath.Join(dir, "cargo"),
+	}
+}
+
 func writeEnvFile(path string, env map[string]string) {
 	keys := make([]string, 0, len(env))
 	for k := range env {
@@ -278,8 +311,9 @@ func writeEnvFile(path string, env map[string]string) {
 
 func (a *Agent) runCommand(ctx context.Context, dir, name string, args []string, env []string, onLine func(string)) error {
 	cmd := exec.CommandContext(ctx, name, args...)
+	prepareCommandGroup(cmd)
 	cmd.Dir = dir
-	cmd.Env = env
+	cmd.Env = sanitizeEnv(env)
 	pr, pw := io.Pipe()
 	cmd.Stdout = pw
 	cmd.Stderr = pw
@@ -335,7 +369,8 @@ func (a *Agent) downloadSource(ctx context.Context, apiPath, dest string) error 
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+a.cfg.Token)
+	req.Header.Set("Authorization", "Bearer "+a.currentToken())
+	req.Header.Set("X-Phleet-Server", a.cfg.ID)
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
 		return err

@@ -54,6 +54,7 @@ func Load(dataDir string) (*Config, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, err
 	}
+	hardenDataDir(dataDir)
 	admin, err := readOrCreate(filepath.Join(dataDir, AdminFile), 32)
 	if err != nil {
 		return nil, err

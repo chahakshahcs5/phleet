@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,11 +29,13 @@ type Server struct {
 	hub     *hub.Hub
 	log     *slog.Logger
 	mux     *http.ServeMux
+	panel   http.Handler
 	started time.Time
 	edge    edgeState
 
-	rrMu sync.Mutex
-	rr   map[string]int
+	rrMu   sync.Mutex
+	rr     map[string]int
+	portMu sync.Mutex
 
 	orphanMu sync.Mutex
 	orphans  map[string]time.Time
@@ -42,6 +45,9 @@ type Server struct {
 
 	offlineMu     sync.Mutex
 	offlineTimers map[string]*time.Timer
+
+	deviceMu      sync.Mutex
+	pendingDevice map[string]string
 
 	tunnel *tunnelManager
 
@@ -57,6 +63,7 @@ func New(cfg *config.Config, st *store.Store, log *slog.Logger) *Server {
 		orphans:       map[string]time.Time{},
 		recAt:         map[string]time.Time{},
 		offlineTimers: map[string]*time.Timer{},
+		pendingDevice: map[string]string{},
 		reconcileCh:   make(chan struct{}, 1),
 		tunnel:        newTunnelManager(cfg, log),
 	}
@@ -70,6 +77,8 @@ func New(cfg *config.Config, st *store.Store, log *slog.Logger) *Server {
 		OnAddonEvent:  s.onAddonEvent,
 	})
 	s.routes()
+	s.panel = s.guard(securityHeaders(s.mux))
+	s.warnSlugCollisions()
 	return s
 }
 
@@ -84,7 +93,9 @@ func (s *Server) Close() {
 	s.hub.CloseAll()
 }
 
-func (s *Server) Handler() http.Handler { return securityHeaders(http.HandlerFunc(s.route)) }
+func (s *Server) Handler() http.Handler {
+	return http.HandlerFunc(s.route)
+}
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -92,8 +103,80 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "same-origin")
 		h.Set("X-Frame-Options", "DENY")
+		h.Set("Content-Security-Policy",
+			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data:; font-src 'self' data:; connect-src 'self' ws: wss:; "+
+				"frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+		// API and agent responses carry tokens, credentials and tenant data.
+		// Never let a browser or intermediary cache them.
+		if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") ||
+			r.URL.Path == "/agent" || strings.HasPrefix(r.URL.Path, "/agent/") ||
+			r.URL.Path == "/download/agent" {
+			h.Set("Cache-Control", "no-store")
+		}
+		if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// guard rejects cross-site state-changing requests. SameSite=Lax does not help
+// here: every project and service lives on a sibling subdomain of the panel,
+// which the browser treats as same-site. The Origin check is therefore the
+// boundary that keeps a compromised app from driving the panel.
+func (s *Server) guard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			next.ServeHTTP(w, r)
+			return
+		}
+		if site := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))); site == "cross-site" {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cross-site request rejected"})
+			return
+		}
+		if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" && !s.originAllowed(origin, r.Host) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "origin is not allowed"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// originAllowed accepts the panel's own host (direct or through the edge) and
+// loopback/LAN development origins. It deliberately does not accept other
+// subdomains of the panel's domain: those are user workloads.
+func (s *Server) originAllowed(origin, requestHost string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	oh := normalizeHost(u.Host)
+	rh := normalizeHost(requestHost)
+	if oh == "" || rh == "" {
+		return false
+	}
+	if oh == rh {
+		return true
+	}
+	publicURL, fleetHost := s.Edge()
+	if fleetHost != "" {
+		if oh == normalizeHost(fleetHost) {
+			return true
+		}
+		if rh == normalizeHost(fleetHost) && publicURL != "" {
+			if pu, err := url.Parse(publicURL); err == nil && normalizeHost(pu.Host) == oh {
+				return true
+			}
+		}
+	}
+	// Local UI development and LAN access. A public sibling subdomain is not
+	// loopback or private, so this does not weaken the production boundary.
+	if (oh == "localhost" || isPrivateHost(oh)) && (rh == "localhost" || isPrivateHost(rh)) {
+		return true
+	}
+	return false
 }
 
 func (s *Server) routes() {
@@ -140,7 +223,6 @@ func (s *Server) routes() {
 	api.HandleFunc("GET /projects/{id}/deployments", s.handleDeployments)
 	api.HandleFunc("GET /projects/{id}/logs", s.handleAppLogs)
 	api.HandleFunc("POST /projects/{id}/source", s.handleUploadSource)
-	api.HandleFunc("GET /projects/{id}/source", s.handleDownloadSource)
 	api.HandleFunc("GET /deployments/{id}", s.handleDeployment)
 
 	api.HandleFunc("GET /services/engines", s.handleServiceEngines)
@@ -178,8 +260,6 @@ func (s *Server) routes() {
 	api.HandleFunc("POST /addons/{id}/backup", s.handleCreateBackup)
 	api.HandleFunc("GET /addons/{id}/backups", s.handleListBackups)
 	api.HandleFunc("POST /addons/{id}/restore", s.handleRestoreBackup)
-	api.HandleFunc("PUT /addons/{id}/backups/{backupId}", s.handleAddonBackupUpload)
-	api.HandleFunc("GET /addons/{id}/backups/{backupId}/download", s.handleAddonBackupDownload)
 
 	api.HandleFunc("GET /alerts", s.handleListAlerts)
 	api.HandleFunc("GET /alerts/count", s.handleAlertCount)
@@ -192,10 +272,22 @@ func (s *Server) routes() {
 
 	s.mux.Handle("POST /api/login", http.HandlerFunc(s.handleLogin))
 	s.mux.HandleFunc("GET /api/meta", s.handleMeta)
-	s.mux.Handle("/api/", http.StripPrefix("/api", s.requireAuth(api)))
+
+	// These three endpoints are also called by the agent itself (source
+	// download, backup upload, restore download), so they must accept the
+	// agent token. Everything else under /api is panel-only.
+	s.mux.Handle("GET /api/projects/{id}/source",
+		s.requirePanelOrAgent(http.HandlerFunc(s.handleDownloadSource)))
+	s.mux.Handle("PUT /api/addons/{id}/backups/{backupId}",
+		s.requirePanelOrAgent(http.HandlerFunc(s.handleAddonBackupUpload)))
+	s.mux.Handle("GET /api/addons/{id}/backups/{backupId}/download",
+		s.requirePanelOrAgent(http.HandlerFunc(s.handleAddonBackupDownload)))
+
+	s.mux.Handle("/api/", http.StripPrefix("/api", s.requirePanelAuth(api)))
 	s.mux.HandleFunc("/agent", s.handleAgent)
 	s.mux.HandleFunc("/agent/data", s.handleAgentData)
 	s.mux.HandleFunc("/healthz", s.handleHealth)
+	s.mux.Handle("GET /metrics", s.requirePanelAuth(http.HandlerFunc(s.handlePrometheus)))
 	s.mux.HandleFunc("/download/agent", s.handleAgentDownload)
 	s.mux.HandleFunc("/download/bootstrap.sh", s.handleBootstrap)
 	s.mux.HandleFunc("/download/bootstrap-root.sh", s.handleBootstrapRoot)
@@ -261,14 +353,125 @@ func bearer(r *http.Request) string {
 	if v := r.Header.Get("X-Phleet-Token"); v != "" {
 		return v
 	}
-	return r.URL.Query().Get("token")
+	return ""
 }
 
-func (s *Server) authed(r *http.Request) bool {
-	if t := bearer(r); t != "" {
-		if secureEq(t, s.cfg.AdminToken) || secureEq(t, s.cfg.AgentToken) {
-			return true
+func (s *Server) adminTokenAuthed(r *http.Request) bool {
+	t := bearer(r)
+	return t != "" && secureEq(t, s.cfg.AdminToken)
+}
+
+func (s *Server) agentTokenAuthed(r *http.Request) bool {
+	t := bearer(r)
+	return t != "" && (secureEq(t, s.cfg.AgentToken) || secureEq(t, s.cfg.AdminToken))
+}
+
+func tokenHash(v string) string {
+	sum := sha256.Sum256([]byte(v))
+	return hex.EncodeToString(sum[:])
+}
+
+// agentServerAuthed verifies the per-device token for one server. An empty
+// hash means the phone has not enrolled yet and still uses the shared token.
+func (s *Server) agentServerAuthed(tok, serverID string) bool {
+	if tok == "" || serverID == "" {
+		return false
+	}
+	if secureEq(tok, s.cfg.AdminToken) {
+		return true
+	}
+	hash, err := s.st.GetServerDeviceHash(serverID)
+	if err == nil && hash != "" {
+		return secureEq(tokenHash(tok), hash)
+	}
+	return secureEq(tok, s.cfg.AgentToken)
+}
+
+// agentHelloAuth authorizes a hello and, for a new or legacy phone, returns a
+// freshly generated device token that the caller must send in hello.ack.
+func (s *Server) agentHelloAuth(tok, serverID string, canEnroll bool) (bool, string) {
+	if secureEq(tok, s.cfg.AdminToken) {
+		return true, ""
+	}
+	hash, err := s.st.GetServerDeviceHash(serverID)
+	if err == nil && hash != "" {
+		return secureEq(tokenHash(tok), hash), ""
+	}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return false, ""
+	}
+	// If the hash write failed after we handed out a token, let that token
+	// finish enrolling instead of locking the phone out.
+	s.deviceMu.Lock()
+	pending := s.pendingDevice[serverID]
+	s.deviceMu.Unlock()
+	if pending != "" {
+		if secureEq(tok, pending) {
+			return true, ""
 		}
+		// A reconnect raced the first enrollment. Hand out the same pending
+		// token rather than replacing it under the other connection.
+		if canEnroll && secureEq(tok, s.cfg.AgentToken) {
+			return true, pending
+		}
+	}
+	// No enrollment yet. Only clients that understand hello.ack may enroll;
+	// an older agent keeps using the shared token so an upgrade cannot lock it
+	// out of its own phone.
+	if secureEq(tok, s.cfg.AgentToken) {
+		if canEnroll {
+			return true, randomHex(32)
+		}
+		return true, ""
+	}
+	return false, ""
+}
+
+func (s *Server) setPendingDeviceToken(serverID, tok string) {
+	s.deviceMu.Lock()
+	s.pendingDevice[serverID] = tok
+	s.deviceMu.Unlock()
+}
+
+func (s *Server) adoptPendingDeviceToken(serverID string) {
+	s.deviceMu.Lock()
+	tok, ok := s.pendingDevice[serverID]
+	if ok {
+		delete(s.pendingDevice, serverID)
+	}
+	s.deviceMu.Unlock()
+	if ok {
+		if err := s.st.SetServerDeviceHash(serverID, tokenHash(tok)); err != nil {
+			s.log.Warn("store device token", "server", serverID, "err", err)
+			// Keep the pending token so the next hello can finish enrollment
+			// instead of locking the phone out.
+			s.setPendingDeviceToken(serverID, tok)
+		}
+	}
+}
+
+// agentHTTPAuthed covers the three HTTP endpoints an agent reaches after
+// enrollment. Device tokens must name their server; the legacy shared token is
+// still accepted when no server header is present (or the phone has not
+// enrolled yet).
+func (s *Server) agentHTTPAuthed(r *http.Request) bool {
+	if s.panelAuthed(r) {
+		return true
+	}
+	tok := bearer(r)
+	if tok == "" {
+		return false
+	}
+	serverID := strings.TrimSpace(r.Header.Get("X-Phleet-Server"))
+	if serverID == "" {
+		return secureEq(tok, s.cfg.AgentToken)
+	}
+	return s.agentServerAuthed(tok, serverID)
+}
+
+func (s *Server) panelAuthed(r *http.Request) bool {
+	if s.adminTokenAuthed(r) {
+		return true
 	}
 	c, err := r.Cookie("phleet_session")
 	if err != nil {
@@ -277,13 +480,26 @@ func (s *Server) authed(r *http.Request) bool {
 	return s.validSession(c.Value)
 }
 
-func (s *Server) requireAuth(next http.Handler) http.Handler {
+func (s *Server) requirePanelAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.authed(r) {
+		if !s.panelAuthed(r) {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+// requirePanelOrAgent is only used by the handful of endpoints that an agent
+// must reach over HTTP. It still accepts the panel session so browser
+// downloads keep working.
+func (s *Server) requirePanelOrAgent(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.agentHTTPAuthed(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 	})
 }
 
@@ -348,6 +564,16 @@ func apiErr(w http.ResponseWriter, code int, err error) {
 }
 
 func readJSON(r *http.Request, dst any, max int64) error {
+	// Requiring JSON forces a CORS preflight for cross-origin callers and
+	// closes the text/plain CSRF hole. Upload endpoints use multipart or octet
+	// streams and do not call this helper.
+	ct := strings.TrimSpace(strings.ToLower(r.Header.Get("Content-Type")))
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = strings.TrimSpace(ct[:i])
+	}
+	if ct != "application/json" {
+		return errors.New("content type must be application/json")
+	}
 	if max <= 0 {
 		max = 1 << 20
 	}

@@ -120,19 +120,22 @@ if [ -d /sdcard ]; then
 fi
 
 umask 077
+sq() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; }
 cat > "$DIR/agent.env" <<EOF
-PHLEET_URL=$SERVER
-PHLEET_TOKEN=$TOKEN
-PHLEET_NAME=$NAME
-PHLEET_ROOTS=$ROOTS
+PHLEET_URL='$(sq "$SERVER")'
+PHLEET_NAME='$(sq "$NAME")'
+PHLEET_ROOTS='$(sq "$ROOTS")'
 EOF
 chmod 600 "$DIR/agent.env"
+printf '%s\n' "$TOKEN" > "$DIR/agent.token"
+chmod 600 "$DIR/agent.token"
 
 cat > "$DIR/run-agent.sh" <<EOF
 #!/system/bin/sh
 set -eu
 DIR="$DIR"
 . "\$DIR/agent.env"
+unset PHLEET_TOKEN PHLEET_TOKEN_FILE
 export HOME="\$DIR"
 export TMPDIR="\$DIR/tmp"
 export SSL_CERT_DIR="\${SSL_CERT_DIR:-/system/etc/security/cacerts}"
@@ -140,7 +143,7 @@ mkdir -p "\$TMPDIR"
 # shellcheck disable=SC2086
 exec "\$DIR/bin/phleet-agent" \\
   --server "\$PHLEET_URL" \\
-  --token "\$PHLEET_TOKEN" \\
+  --token-file "\$DIR/agent.token" \\
   --name "\$PHLEET_NAME" \\
   --state "\$DIR/state" \\
   \$PHLEET_ROOTS

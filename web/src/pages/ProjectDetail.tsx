@@ -340,6 +340,14 @@ export default function ProjectDetail() {
                         {project.placements.find((p) => p.serverId === detail.data?.deployment.serverId)?.serverName ||
                           detail.data.deployment.serverId.slice(0, 8)}
                       </Badge>
+                      {detail.data.deployment.commitSha ? (
+                        <span className="font-mono text-[10px] text-zinc-500" title={detail.data.deployment.commitSha}>
+                          {detail.data.deployment.commitSha.slice(0, 8)}
+                        </span>
+                      ) : null}
+                      {detail.data.deployment.release ? (
+                        <span className="font-mono text-[10px] text-zinc-600">{detail.data.deployment.release}</span>
+                      ) : null}
                       <span className="text-[10px] text-zinc-600">{time(detail.data.deployment.startedAt)}</span>
                     </div>
                     <div className="flex items-center gap-2 text-[10px] text-zinc-500">

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +31,9 @@ type harness struct {
 	srv   *httptest.Server
 	cfg   *config.Config
 	store *store.Store
+
+	deviceMu sync.Mutex
+	device   map[string]string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -50,7 +54,25 @@ func newHarness(t *testing.T) *harness {
 		ts.Close()
 		st.Close()
 	})
-	return &harness{api: api, srv: ts, cfg: cfg, store: st}
+	return &harness{api: api, srv: ts, cfg: cfg, store: st, device: map[string]string{}}
+}
+
+func (h *harness) tokenFor(serverID string) string {
+	h.deviceMu.Lock()
+	defer h.deviceMu.Unlock()
+	if tok := h.device[serverID]; tok != "" {
+		return tok
+	}
+	return h.cfg.AgentToken
+}
+
+func (h *harness) rememberToken(serverID, tok string) {
+	if tok == "" {
+		return
+	}
+	h.deviceMu.Lock()
+	h.device[serverID] = tok
+	h.deviceMu.Unlock()
 }
 
 func (h *harness) wsURL() string {
@@ -88,10 +110,16 @@ func dialAgent(t *testing.T, h *harness, id string) *websocket.Conn {
 
 func dialAgentCaps(t *testing.T, h *harness, id string, caps map[string]any) *websocket.Conn {
 	t.Helper()
+	if caps == nil {
+		caps = map[string]any{}
+	}
+	if _, ok := caps["deviceTokens"]; !ok {
+		caps["deviceTokens"] = true
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	ws, _, err := websocket.Dial(ctx, h.wsURL(), &websocket.DialOptions{
-		HTTPHeader: http.Header{"Authorization": []string{"Bearer " + h.cfg.AgentToken}},
+		HTTPHeader: http.Header{"Authorization": []string{"Bearer " + h.tokenFor(id)}},
 	})
 	if err != nil {
 		t.Fatalf("dial agent: %v", err)
@@ -103,6 +131,22 @@ func dialAgentCaps(t *testing.T, h *harness, id string, caps map[string]any) *we
 		Arch: "arm64", AgentVersion: "test", Caps: caps,
 	}
 	writeEnv(t, ws, agentproto.TypeHello, "", hello)
+
+	actx, acancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_, data, err := ws.Read(actx)
+	acancel()
+	if err != nil {
+		t.Fatalf("read hello.ack: %v", err)
+	}
+	var env agentproto.Envelope
+	if err := json.Unmarshal(data, &env); err != nil || env.Type != agentproto.TypeHelloAck {
+		t.Fatalf("expected hello.ack, got %s (%v)", env.Type, err)
+	}
+	var ack agentproto.HelloAck
+	if err := json.Unmarshal(env.Data, &ack); err != nil || !ack.OK {
+		t.Fatalf("bad hello.ack: %v", err)
+	}
+	h.rememberToken(id, ack.Token)
 	return ws
 }
 
@@ -1172,6 +1216,25 @@ func TestChunkedBackupUpload(t *testing.T) {
 	// A gap is rejected instead of silently corrupting the dump.
 	if code, _ := h.doRaw(t, http.MethodPut, "/api/addons/a-chunk/backups/b-chunk?offset=99&last=true", []byte("x")); code != 409 {
 		t.Fatalf("expected 409 for a bad offset, got %d", code)
+	}
+}
+
+func TestStreamingFileDownload(t *testing.T) {
+	h := newHarness(t)
+	sess := dialDataTunnel(t, h, "phone-fs")
+	go tunnel.ServeStreamsWithFiles(sess, nil, func(stream *yamux.Stream, req tunnel.RequestHeader) error {
+		if req.Kind != "fs" || req.Path != "hello.txt" {
+			return tunnel.WriteFrame(stream, tunnel.ResponseHeader{Status: 404, Error: "not found"})
+		}
+		if err := tunnel.WriteFrame(stream, tunnel.ResponseHeader{Status: 200, ContentLength: 5}); err != nil {
+			return err
+		}
+		_, err := stream.Write([]byte("hello"))
+		return err
+	})
+	code, body := h.doRaw(t, http.MethodGet, "/api/servers/phone-fs/download?path=hello.txt", nil)
+	if code != http.StatusOK || string(body) != "hello" {
+		t.Fatalf("streamed download = %d %q", code, body)
 	}
 }
 

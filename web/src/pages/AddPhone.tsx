@@ -222,7 +222,7 @@ export default function AddPhone() {
             {command || 'waiting for the control plane URL…'}
           </pre>
           <p className="mt-2 text-[10px] leading-relaxed text-zinc-600">
-            The command contains the fleet agent token. Treat it as a secret; anyone with it can register a phone.
+            The command contains the shared enrollment token. Treat it as a secret; anyone with it can register a new phone, but not take over an already-enrolled one.
           </p>
         </Card>
       )}

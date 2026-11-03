@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,10 @@ func (a *Agent) setCaps(caps map[string]any) {
 		return
 	}
 	a.capsMu.Lock()
+	if reflect.DeepEqual(a.caps, caps) {
+		a.capsMu.Unlock()
+		return
+	}
 	a.caps = caps
 	a.capsGen++
 	a.capsMu.Unlock()
@@ -852,7 +857,8 @@ func (a *Agent) uploadFile(ctx context.Context, apiPath, src string) error {
 			return err
 		}
 		req.ContentLength = n
-		req.Header.Set("Authorization", "Bearer "+a.cfg.Token)
+		req.Header.Set("Authorization", "Bearer "+a.currentToken())
+		req.Header.Set("X-Phleet-Server", a.cfg.ID)
 		req.Header.Set("Content-Type", "application/octet-stream")
 		resp, err := a.httpClient.Do(req)
 		if err != nil {
@@ -876,7 +882,8 @@ func (a *Agent) downloadFile(ctx context.Context, apiPath, dest string) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+a.cfg.Token)
+	req.Header.Set("Authorization", "Bearer "+a.currentToken())
+	req.Header.Set("X-Phleet-Server", a.cfg.ID)
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
 		return err

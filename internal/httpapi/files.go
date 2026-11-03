@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"phleet/internal/agentproto"
+	"phleet/internal/tunnel"
 )
 
 const (
@@ -256,9 +257,18 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 400, fmt.Errorf("path is required"))
 		return
 	}
+	if s.streamDownload(w, r.PathValue("id"), p) {
+		return
+	}
+	// Fallback for agents that predate "fs" streams. New agents stream any
+	// size; the legacy path is capped at 96 MB and must not truncate silently.
 	var res agentproto.FSReadResponse
 	if err := s.fsCall(r, agentproto.TypeFSRead, agentproto.FSReadRequest{Path: p, MaxBytes: maxDownloadBytes}, &res); err != nil {
 		apiErr(w, 502, err)
+		return
+	}
+	if res.Truncated {
+		apiErr(w, 413, fmt.Errorf("file is larger than the %d MB download limit; update the agent to stream larger files", maxDownloadBytes>>20))
 		return
 	}
 	name := path.Base(res.Path)
@@ -267,4 +277,39 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(res.Data)))
 	w.WriteHeader(200)
 	_, _ = w.Write(res.Data)
+}
+
+// streamDownload returns true when it has handled the response. It returns
+// false only before writing anything, so the caller can fall back to the old
+// base64 protocol for older agents.
+func (s *Server) streamDownload(w http.ResponseWriter, serverID, filePath string) bool {
+	sess, ok := s.hub.Tunnel(serverID)
+	if !ok {
+		return false
+	}
+	stream, err := sess.OpenStream()
+	if err != nil {
+		return false
+	}
+	_ = stream.SetDeadline(time.Now().Add(5 * time.Minute))
+	if err := tunnel.WriteFrame(stream, tunnel.RequestHeader{Kind: "fs", Path: filePath}); err != nil {
+		_ = stream.Close()
+		return false
+	}
+	var res tunnel.ResponseHeader
+	if err := tunnel.ReadFrame(stream, &res); err != nil || res.Status != 200 {
+		_ = stream.Close()
+		return false
+	}
+	_ = stream.SetDeadline(time.Time{})
+	name := path.Base(filePath)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename*=UTF-8''%s", url.PathEscape(name)))
+	if res.ContentLength >= 0 {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", res.ContentLength))
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, stream)
+	_ = stream.Close()
+	return true
 }

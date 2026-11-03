@@ -30,7 +30,8 @@ func (m *multiFlag) Set(v string) error {
 
 func main() {
 	server := flag.String("server", env("PHLEET_URL", ""), "control plane URL, e.g. https://fleet.example.com")
-	token := flag.String("token", env("PHLEET_TOKEN", ""), "agent token")
+	token := flag.String("token", "", "agent token (deprecated: visible in process args; prefer -token-file)")
+	tokenFile := flag.String("token-file", env("PHLEET_TOKEN_FILE", ""), "file containing the agent token")
 	name := flag.String("name", env("PHLEET_NAME", ""), "display name for this phone")
 	id := flag.String("id", env("PHLEET_ID", ""), "stable agent id (generated on first run)")
 	stateDir := flag.String("state", "", "state directory (default ~/.phleet)")
@@ -46,10 +47,6 @@ func main() {
 	}
 	if *server == "" {
 		fmt.Fprintln(os.Stderr, "error: --server is required (or PHLEET_URL)")
-		os.Exit(2)
-	}
-	if *token == "" {
-		fmt.Fprintln(os.Stderr, "error: --token is required (or PHLEET_TOKEN)")
 		os.Exit(2)
 	}
 	u, err := normalizeURL(*server)
@@ -68,6 +65,28 @@ func main() {
 	if *stateDir == "" {
 		*stateDir = filepath.Join(home, ".phleet")
 	}
+	// Prefer a token file so the secret never appears in the process command
+	// line, where any process running as the same user can read it.
+	if strings.TrimSpace(*token) == "" {
+		file := strings.TrimSpace(*tokenFile)
+		if file == "" {
+			file = filepath.Join(*stateDir, "agent.token")
+		}
+		if b, err := os.ReadFile(file); err == nil {
+			*token = strings.TrimSpace(string(b))
+			*tokenFile = file
+		}
+	}
+	// Env is a last resort: a persisted per-device token in a file must win
+	// over a stale PHLEET_TOKEN exported by an old installer.
+	if strings.TrimSpace(*token) == "" {
+		*token = strings.TrimSpace(os.Getenv("PHLEET_TOKEN"))
+	}
+	if strings.TrimSpace(*token) == "" {
+		fmt.Fprintln(os.Stderr, "error: an agent token is required (--token-file, --token or PHLEET_TOKEN)")
+		os.Exit(2)
+	}
+	*token = strings.TrimSpace(*token)
 	if *name == "" {
 		if h, err := os.Hostname(); err == nil && h != "" {
 			*name = h
@@ -77,12 +96,13 @@ func main() {
 	}
 
 	a, err := agent.New(agent.Config{
-		URL:      u,
-		Token:    *token,
-		Name:     *name,
-		ID:       *id,
-		StateDir: *stateDir,
-		Roots:    roots,
+		URL:       u,
+		Token:     *token,
+		TokenPath: *tokenFile,
+		Name:      *name,
+		ID:        *id,
+		StateDir:  *stateDir,
+		Roots:     roots,
 	}, log)
 	if err != nil {
 		log.Error("init failed", "err", err)

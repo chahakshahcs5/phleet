@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"phleet/internal/agentproto"
@@ -92,9 +94,44 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteServer(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.st.GetServer(id); err != nil {
+	srv, err := s.st.GetServer(id)
+	if err != nil {
 		apiErr(w, 404, err)
 		return
+	}
+	// A database is a volume on that phone. Forgetting the phone would leave
+	// the addon permanently unreachable and might make someone think the data
+	// was gone rather than on a device that is no longer registered.
+	if addonPlacements, err := s.st.ListAddonPlacementsForServer(id); err == nil && len(addonPlacements) > 0 {
+		names := make([]string, 0, len(addonPlacements))
+		for _, pl := range addonPlacements {
+			if a, err := s.st.GetAddon(pl.AddonID); err == nil {
+				names = append(names, a.Name)
+			} else {
+				names = append(names, pl.AddonID)
+			}
+		}
+		apiErr(w, 409, fmt.Errorf("this phone hosts %s; delete or promote those addons before removing the phone",
+			strings.Join(names, ", ")))
+		return
+	}
+	// Stop project replicas while the connection is still usable, then remove
+	// the rows. If the phone is offline the orphan sweep stops them when it
+	// reconnects.
+	if placements, err := s.st.ListPlacementsForServer(id); err == nil {
+		for _, pl := range placements {
+			if !s.hub.Online(id) {
+				break
+			}
+			p, err := s.st.GetProject(pl.ProjectID)
+			if err != nil {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			_, _ = s.hub.Call(ctx, id, agentproto.TypeAppControl,
+				agentproto.AppControlRequest{Slug: p.Slug, Action: "delete"})
+			cancel()
+		}
 	}
 	s.hub.Kick(id)
 	if err := s.st.DeleteServer(id); err != nil {
@@ -104,7 +141,8 @@ func (s *Server) handleDeleteServer(w http.ResponseWriter, r *http.Request) {
 	for _, suffix := range []string{":offline", ":temp", ":battery", ":disk"} {
 		_, _ = s.st.ResolveAlert("server:" + id + suffix)
 	}
-	_ = s.st.AddEvent("ui", "server.delete", id, "")
+	_ = s.st.AddEvent("ui", "server.delete", id, serverLabel(srv))
+	s.triggerReconcile()
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 

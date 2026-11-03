@@ -196,25 +196,28 @@ fi
 say "agent $(chroot "$ROOT" /bin/sh -c "$INNER/bin/phleet-agent --version")"
 
 umask 077
+sq() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; }
 cat > "$HOST_DIR/agent.env" <<EOF
-PHLEET_URL=$SERVER
-PHLEET_TOKEN=$TOKEN
-PHLEET_NAME=$NAME
+PHLEET_URL='$(sq "$SERVER")'
+PHLEET_NAME='$(sq "$NAME")'
 EOF
 chmod 600 "$HOST_DIR/agent.env"
+printf '%s\n' "$TOKEN" > "$HOST_DIR/agent.token"
+chmod 600 "$HOST_DIR/agent.token"
 
 cat > "$HOST_DIR/run-agent.sh" <<EOF
 #!/bin/sh
 set -eu
 DIR="$INNER"
 . "\$DIR/agent.env"
+unset PHLEET_TOKEN PHLEET_TOKEN_FILE
 export HOME="/home/$USER_NAME"
 export TMPDIR=/tmp
 # runuser starts with a minimal PATH; npm global binaries live in /usr/local/bin.
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 exec "\$DIR/bin/phleet-agent" \\
   --server "\$PHLEET_URL" \\
-  --token "\$PHLEET_TOKEN" \\
+  --token-file "\$DIR/agent.token" \\
   --name "\$PHLEET_NAME" \\
   --state "\$DIR/state"
 EOF

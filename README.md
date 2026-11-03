@@ -63,7 +63,7 @@ standbys all work.
 ## Requirements
 
 - Windows 10/11 for the control plane (the binaries also build for Linux/macOS)
-- Go 1.22+ and Node 20+ to build
+- Go 1.27+ and Node 20+ to build (the Linux/arm64 agent is still built with Go 1.22 for Android 10 compatibility)
 - A domain on Cloudflare (free plan is fine) for public access
 - `cloudflared` installed if you want the service auto-installed
 - Phones with [Termux](https://f-droid.org/packages/com.termux/) (F-Droid build, not the Play Store one)
@@ -441,7 +441,12 @@ No notification credentials? Alerts still appear in the panel and the sidebar ba
 
 - The panel binds to `127.0.0.1` by default; only cloudflared reaches it.
 - Put **Cloudflare Access** in front of `fleet.example.com` (Zero Trust → Access → Applications), with a path bypass for `/agent` and `/agent/data` so phones can connect.
-- One agent token covers the fleet today. Per-device tokens and mTLS are on the roadmap.
+- The shared fleet token is now an **enrollment token**. On the first hello the control plane issues a random per-device token, stores only its SHA-256 hash, and overwrites the phone's `agent.token`. Later control and data connections must present that device token; the shared token cannot re-enroll an existing phone. The device token is never accepted by the panel API.
+- The agent token lives in `~/.phleet/agent.token` (mode `0600`) and is passed with `--token-file`, not in the process command line. Apps and services run as the same Termux user, so a leaked device token still lets its holder act as that phone; per-device isolation is only as strong as the phone's OS sandbox.
+- Re-running the bootstrap on an already-enrolled phone is rejected until you delete the phone in **Fleet → Server → Settings** (or keep its existing `agent.token`). This prevents the shared enrollment token from taking over an existing device.
+- State-changing panel requests are origin-checked, JSON bodies require `Content-Type: application/json`, and the terminal WebSocket rejects sibling-subdomain origins. This is what keeps a compromised project or service from driving the panel.
+- Apps bind to `127.0.0.1` by default. Set `HOST` in the project environment only if you deliberately want direct LAN access.
+- On Windows, `phleetd` applies an ACL to its data directory (SYSTEM, Administrators and the account running phleetd) because Go's `0600` mode does not restrict Windows users.
 - The file API is confined to `$HOME` (plus `--root` directories you pass explicitly) and resolves symlinks before every check.
 - Panel tokens never leave the host through the API, and the session cookie, `Authorization` and `X-Phleet-Token` headers are stripped before requests are proxied to project apps.
 - Project environment variables are encrypted at rest with AES-256-GCM using a key derived from the control plane secret.
@@ -488,6 +493,12 @@ Running phones as servers has real limits: no cgroups, no containers without roo
 ## Development
 
 ```powershell
+# consistent snapshot of the control-plane database (safe while phleetd runs)
+.\dist\phleet.exe backup -data "$env:ProgramData\phleet" -out D:\backups\phleet.db
+
+# small Prometheus scrape (admin token required)
+curl -H "Authorization: Bearer $env:PHLEET_ADMIN" http://127.0.0.1:8080/metrics
+
 # control plane with verbose logs
 .\dist\phleetd.exe -addr 127.0.0.1:8080 -debug
 

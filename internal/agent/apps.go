@@ -405,6 +405,11 @@ func (a *Agent) waitProcess(p *appProcess, cmd *exec.Cmd, logFile *os.File, done
 		return
 	}
 	p.status = "crashed"
+	// A process that stayed up for a minute is not in a crash loop; reset the
+	// backoff so a later single failure does not wait 30 seconds.
+	if time.Since(p.startedAt) > time.Minute {
+		p.restarts = 0
+	}
 	p.restarts++
 	if err != nil {
 		p.lastError = err.Error()
@@ -867,7 +872,7 @@ func sameUser(pid int) bool {
 }
 
 func appEnv(spec AppSpec) []string {
-	env := append([]string{}, os.Environ()...)
+	env := sanitizeEnv(os.Environ())
 	// Addons must not inherit the app contract: HOST=0.0.0.0 in particular
 	// would contradict the loopback-only bind in their own args. This applies
 	// to every addon kind, not just databases and caches.
@@ -882,9 +887,12 @@ func appEnv(spec AppSpec) []string {
 		}
 		return env
 	}
+	// The agent reaches apps over loopback. Binding 0.0.0.0 would expose the
+	// port on Wi-Fi too, which contradicts "phones never accept inbound".
+	// Users who explicitly want LAN access can override HOST in project env.
 	env = append(env,
 		"PORT="+fmt.Sprint(spec.Port),
-		"HOST=0.0.0.0",
+		"HOST=127.0.0.1",
 		"NODE_ENV=production",
 		"PHLEET_APP="+spec.Slug,
 		"PHLEET_PORT="+fmt.Sprint(spec.Port),

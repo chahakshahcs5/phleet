@@ -162,6 +162,19 @@ func slugify(name string) string {
 	return out
 }
 
+// workloadSlugExists reports whether a slug is already used by any workload.
+// Projects, services and addons share the phone's ~/apps/<slug> namespace and
+// the agent's supervisor map, so uniqueness must span both tables.
+func (s *Server) workloadSlugExists(slug string) bool {
+	if _, err := s.st.GetProjectBySlug(slug); err == nil {
+		return true
+	}
+	if _, err := s.st.GetAddonBySlug(slug); err == nil {
+		return true
+	}
+	return false
+}
+
 func (s *Server) uniqueSlug(base string) (string, error) {
 	base = strings.Trim(base, "-")
 	if base == "" {
@@ -175,11 +188,76 @@ func (s *Server) uniqueSlug(base string) (string, error) {
 		if reservedSlugs[candidate] {
 			continue
 		}
-		if _, err := s.st.GetProjectBySlug(candidate); errors.Is(err, store.ErrNotFound) {
+		if !s.workloadSlugExists(candidate) {
 			return candidate, nil
 		}
 	}
 	return "", errors.New("could not find a free slug")
+}
+
+// hostnameTaken checks both projects and addons. Object storage uses an
+// "s3-<name>" hostname, so checking only projects is not enough.
+func (s *Server) hostnameTaken(host string) bool {
+	if _, err := s.st.GetProjectByHostname(host); err == nil {
+		return true
+	}
+	if _, err := s.st.GetAddonByHostname(host); err == nil {
+		return true
+	}
+	return false
+}
+
+// warnSlugCollisions surfaces databases created before slug uniqueness was
+// enforced across projects and addons. They cannot be renamed automatically,
+// but the operator should know before the supervisor starts confusing them.
+func (s *Server) warnSlugCollisions() {
+	projects, err := s.st.ListProjects()
+	if err != nil {
+		return
+	}
+	addons, err := s.st.ListAddons()
+	if err != nil {
+		return
+	}
+	used := make(map[string]string, len(projects))
+	for _, p := range projects {
+		used[p.Slug] = p.Name
+	}
+	for _, a := range addons {
+		if name, ok := used[a.Slug]; ok {
+			s.log.Warn("workload slug collision; rename one of them",
+				"slug", a.Slug, "project", name, "addon", a.Name)
+			continue
+		}
+		used[a.Slug] = a.Name
+	}
+}
+
+// projectSourceOnServer gates agent source downloads. A stack source belongs
+// to the parent row, while placements belong to its child services, so both
+// the project itself and its children are checked.
+func (s *Server) projectSourceOnServer(p model.Project, serverID string) bool {
+	if serverID == "" {
+		return false
+	}
+	if placements, err := s.st.ListProjectPlacements(p.ID); err == nil {
+		for _, pl := range placements {
+			if pl.ServerID == serverID {
+				return true
+			}
+		}
+	}
+	if children, err := s.st.ListChildProjects(p.ID); err == nil {
+		for _, child := range children {
+			placements, _ := s.st.ListProjectPlacements(child.ID)
+			for _, pl := range placements {
+				if pl.ServerID == serverID {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (s *Server) allocatePort(serverID string) (int, error) {
@@ -275,15 +353,21 @@ func (s *Server) ensurePlacements(p model.Project) ([]model.Placement, error) {
 		}
 	}
 	for _, serverID := range plan {
+		// Keep the read-alloc-insert sequence atomic. The single SQLite
+		// connection protects each statement, not the gap between them.
+		s.portMu.Lock()
 		port, err := s.allocatePort(serverID)
 		if err != nil {
+			s.portMu.Unlock()
 			return existing, err
 		}
 		pl := model.Placement{
 			ProjectID: p.ID, ServerID: serverID, Port: port, Status: "pending", Desired: "running",
 			UpdatedAt: time.Now().Unix(),
 		}
-		if err := s.st.UpsertPlacement(pl); err != nil {
+		err = s.st.UpsertPlacement(pl)
+		s.portMu.Unlock()
+		if err != nil {
 			return existing, err
 		}
 		existing = append(existing, pl)
@@ -483,7 +567,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hostname := slug + "." + s.appSuffix()
-	if existing, err := s.st.GetProjectByHostname(hostname); err == nil && existing.ID != "" {
+	if s.hostnameTaken(hostname) {
 		apiErr(w, 409, fmt.Errorf("hostname %s is already in use", hostname))
 		return
 	}
@@ -678,12 +762,12 @@ func (s *Server) handleCreateStack(w http.ResponseWriter, body createProjectBody
 			fail(400, fmt.Errorf("subdomain %q is reserved", svcSlug))
 			return
 		}
-		if existing, err := s.st.GetProjectBySlug(svcSlug); err == nil && existing.ID != "" {
+		if s.workloadSlugExists(svcSlug) {
 			fail(409, fmt.Errorf("subdomain %s is already in use", svcSlug))
 			return
 		}
 		hostname := svcSlug + "." + s.appSuffix()
-		if existing, err := s.st.GetProjectByHostname(hostname); err == nil && existing.ID != "" {
+		if s.hostnameTaken(hostname) {
 			fail(409, fmt.Errorf("hostname %s is already in use", hostname))
 			return
 		}
@@ -1311,23 +1395,30 @@ func (s *Server) onDeployEvent(serverID string, ev agentproto.DeployEvent) {
 		if err != nil {
 			return
 		}
+		release := dep.Release
+		if ev.Release != "" {
+			release = ev.Release
+		}
+		if ev.Commit != "" {
+			_ = s.st.SetDeploymentCommit(ev.DeploymentID, ev.Commit)
+		}
 		if isTerminalDeploy(ev.Status) {
-			_ = s.st.FinishDeployment(ev.DeploymentID, ev.Status, dep.Release, ev.Error)
+			_ = s.st.FinishDeployment(ev.DeploymentID, ev.Status, release, ev.Error)
 			_ = s.st.AddEvent("agent", "deploy."+ev.Status, dep.ProjectID, ev.Error)
 		} else {
-			_ = s.st.UpdateDeploymentStatus(ev.DeploymentID, ev.Status, dep.Release, ev.Error)
+			_ = s.st.UpdateDeploymentStatus(ev.DeploymentID, ev.Status, release, ev.Error)
 		}
 		switch ev.Status {
 		case "active":
-			_ = s.st.UpdatePlacementStatusFor(dep.ProjectID, dep.ServerID, "running", 0, 0, "", dep.Release)
+			_ = s.st.UpdatePlacementStatusFor(dep.ProjectID, dep.ServerID, "running", 0, 0, "", release)
 			s.startDeployAlertResolve(dep.ProjectID)
 		case "rolled_back":
-			_ = s.st.UpdatePlacementStatusFor(dep.ProjectID, dep.ServerID, "running", 0, 0, ev.Error, dep.Release)
+			_ = s.st.UpdatePlacementStatusFor(dep.ProjectID, dep.ServerID, "running", 0, 0, ev.Error, release)
 			s.startDeployAlertResolve(dep.ProjectID)
 		case "failed":
-			_ = s.st.UpdatePlacementStatusFor(dep.ProjectID, dep.ServerID, "failed", 0, 0, ev.Error, dep.Release)
+			_ = s.st.UpdatePlacementStatusFor(dep.ProjectID, dep.ServerID, "failed", 0, 0, ev.Error, release)
 		default:
-			_ = s.st.UpdatePlacementStatusFor(dep.ProjectID, dep.ServerID, "deploying", 0, 0, "", dep.Release)
+			_ = s.st.UpdatePlacementStatusFor(dep.ProjectID, dep.ServerID, "deploying", 0, 0, "", release)
 		}
 		if isTerminalDeploy(ev.Status) {
 			s.triggerReconcile()
@@ -1342,9 +1433,24 @@ func (s *Server) onDeployEvent(serverID string, ev agentproto.DeployEvent) {
 func (s *Server) syncAppStatus(serverID string, app agentproto.AppStatus) {
 	p, err := s.st.GetProjectBySlug(app.Slug)
 	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			// A locked/corrupt database must never look like "the workload
+			// was deleted" and stop a healthy app.
+			s.log.Warn("resolve app slug", "slug", app.Slug, "err", err)
+			return
+		}
 		// Addon instances share the same supervisor and heartbeat. Resolve
-		// them by slug and let the addon path own the status update.
-		s.syncAddonStatus(serverID, app)
+		// them by slug and let the addon path own the status update. If
+		// neither exists, the workload was deleted while this phone was
+		// offline; stop it instead of leaving it running forever.
+		found, addonErr := s.syncAddonStatus(serverID, app)
+		if addonErr != nil {
+			s.log.Warn("resolve addon slug", "slug", app.Slug, "err", addonErr)
+			return
+		}
+		if !found {
+			s.cleanupUnknownApp(serverID, app)
+		}
 		return
 	}
 	placements, _ := s.st.ListProjectPlacements(p.ID)
@@ -1386,11 +1492,8 @@ func (s *Server) cleanupOrphanApp(serverID string, p model.Project, app agentpro
 	if app.State == "" || app.State == "stopped" || app.State == "unknown" {
 		return
 	}
-	// Only clean up when the project lives somewhere else.
-	placements, _ := s.st.ListProjectPlacements(p.ID)
-	if len(placements) == 0 {
-		return
-	}
+	// A project with no placements at all is also orphaned. Previously this
+	// returned early, which is exactly the "deleted while offline" case.
 	key := serverID + "/" + p.Slug
 	s.orphanMu.Lock()
 	last, seen := s.orphans[key]
@@ -1414,6 +1517,33 @@ func (s *Server) cleanupOrphanApp(serverID string, p model.Project, app agentpro
 		_, _ = s.hub.Call(ctx, serverID, agentproto.TypeAppControl, agentproto.AppControlRequest{Slug: p.Slug, Action: "delete"})
 	}()
 	_ = s.st.AddEvent("scheduler", "placement.orphan_removed", p.ID, serverID)
+}
+
+// cleanupUnknownApp stops a supervised process whose slug is neither a
+// project nor an addon. This is what closes the gap when a workload is deleted
+// while its phone is offline: the rows are gone, the app is still running, and
+// nothing else would ever tell the agent to stop it.
+func (s *Server) cleanupUnknownApp(serverID string, app agentproto.AppStatus) {
+	if app.Slug == "" || app.State == "" || app.State == "stopped" || app.State == "unknown" {
+		return
+	}
+	key := "unknown:" + serverID + "/" + app.Slug
+	s.orphanMu.Lock()
+	last, seen := s.orphans[key]
+	if seen && time.Since(last) < 10*time.Minute {
+		s.orphanMu.Unlock()
+		return
+	}
+	s.orphans[key] = time.Now()
+	s.orphanMu.Unlock()
+	s.log.Info("stopping unknown app", "server", serverID, "slug", app.Slug)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		_, _ = s.hub.Call(ctx, serverID, agentproto.TypeAppControl,
+			agentproto.AppControlRequest{Slug: app.Slug, Action: "delete"})
+	}()
+	_ = s.st.AddEvent("scheduler", "workload.unknown_removed", serverID, app.Slug)
 }
 
 // enforceStopped makes the device honour a stop that was requested while it

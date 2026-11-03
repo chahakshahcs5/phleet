@@ -18,8 +18,11 @@ import (
 )
 
 func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
+	// The header may contain the shared enrollment token or a per-device
+	// token. We cannot know which until the hello supplies the server ID, so
+	// accept the socket and verify immediately after reading hello.
 	tok := bearer(r)
-	if tok == "" || (!secureEq(tok, s.cfg.AgentToken) && !secureEq(tok, s.cfg.AdminToken)) {
+	if tok == "" {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -59,6 +62,27 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 	if hb.Caps == nil {
 		hb.Caps = map[string]any{}
 	}
+	canEnroll, _ := hb.Caps["deviceTokens"].(bool)
+	ok, newToken := s.agentHelloAuth(tok, hb.ID, canEnroll)
+	if !ok {
+		s.log.Warn("agent hello rejected", "id", hb.ID, "host", hb.Hostname)
+		_ = ws.Close(websocket.StatusPolicyViolation, "unauthorized")
+		return
+	}
+	ackRaw, _ := json.Marshal(agentproto.HelloAck{OK: true, Token: newToken})
+	ack, _ := json.Marshal(agentproto.Envelope{Type: agentproto.TypeHelloAck, Data: ackRaw})
+	wctx, wcancel := context.WithTimeout(r.Context(), 10*time.Second)
+	err = ws.Write(wctx, websocket.MessageText, ack)
+	wcancel()
+	if err != nil {
+		s.log.Warn("agent hello ack failed", "id", hb.ID, "err", err)
+		return
+	}
+	if newToken != "" {
+		// Commit the hash when the connection registers, after the token has
+		// safely left the control plane.
+		s.setPendingDeviceToken(hb.ID, newToken)
+	}
 	s.log.Info("agent connected", "id", hb.ID, "name", hb.Name, "host", hb.Hostname, "arch", hb.Arch)
 
 	conn := hub.NewConn(hb.ID, ws)
@@ -95,6 +119,7 @@ func (s *Server) onHello(hb agentproto.Hello) error {
 	if err := s.st.UpsertServer(srv); err != nil {
 		return err
 	}
+	s.adoptPendingDeviceToken(hb.ID)
 	_ = s.st.AddEvent("agent", "agent.online", hb.ID, name+" ("+hb.Hostname+")")
 	s.triggerReconcile()
 	go s.syncRelaysForServer(hb.ID)
@@ -108,11 +133,18 @@ func (s *Server) onHeartbeat(id string, hb agentproto.Heartbeat) {
 	// heartbeat after it starts). Store nothing rather than a row of zeroes,
 	// but still touch the server and process apps/caps below.
 	if m.At != 0 {
+		// Store control-plane time, not the phone's clock. Android clocks can
+		// be wrong after boot, and a malicious agent must not be able to write
+		// far-future rows that break charts and retention.
+		storedAt := time.Now().Unix()
+		if skew := storedAt - m.At; skew > 300 || skew < -300 {
+			s.log.Debug("agent clock skew", "server", id, "skewSec", skew)
+		}
 		sm := model.Metrics{
 			CPUPercent: m.CPUPercent, MemUsed: m.MemUsed, MemTotal: m.MemTotal,
 			DiskUsed: m.DiskUsed, DiskTotal: m.DiskTotal, TempC: m.TempC,
 			BatteryPct: m.BatteryPct, BatteryTemp: m.BatteryTemp, Charging: m.Charging,
-			Load1: m.Load1, NetRx: m.NetRx, NetTx: m.NetTx, Uptime: m.Uptime, At: m.At,
+			Load1: m.Load1, NetRx: m.NetRx, NetTx: m.NetTx, Uptime: m.Uptime, At: storedAt,
 		}
 		if err := s.st.InsertMetrics(id, sm); err != nil {
 			s.log.Warn("insert metrics", "err", err, "server", id)
@@ -189,8 +221,7 @@ func (s *Server) markOffline(id string) {
 }
 
 func (s *Server) handleAgentDownload(w http.ResponseWriter, r *http.Request) {
-	tok := bearer(r)
-	if tok == "" || (!secureEq(tok, s.cfg.AgentToken) && !secureEq(tok, s.cfg.AdminToken)) {
+	if !s.agentTokenAuthed(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

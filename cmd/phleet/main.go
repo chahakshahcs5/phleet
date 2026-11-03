@@ -19,6 +19,7 @@ import (
 
 	"phleet/internal/cloudflare"
 	"phleet/internal/config"
+	"phleet/internal/store"
 )
 
 func main() {
@@ -35,6 +36,8 @@ func main() {
 		os.Exit(servers(os.Args[2:]))
 	case "token":
 		os.Exit(printTokens(os.Args[2:]))
+	case "backup":
+		os.Exit(backupDB(os.Args[2:]))
 	case "version", "-v", "--version":
 		fmt.Println("phleet " + config.Version)
 	default:
@@ -52,6 +55,7 @@ func usage() {
   phleet doctor [flags]        Check tunnel, DNS and local control plane health.
   phleet servers [flags]       List registered phones.
   phleet token [-which admin|agent|both]
+  phleet backup [-out FILE]    Write a consistent snapshot of phleet.db
 
 Flags:
   -data DIR        data directory (default ` + config.DefaultDataDir() + `)
@@ -399,6 +403,39 @@ func printTokens(args []string) int {
 	if *which == "agent" || *which == "both" {
 		fmt.Println(cfg.AgentToken)
 	}
+	return 0
+}
+
+func backupDB(args []string) int {
+	fs := flag.NewFlagSet("backup", flag.ExitOnError)
+	dataDir := fs.String("data", config.DefaultDataDir(), "data directory")
+	out := fs.String("out", "", "output file (default <data>/backups/phleet-<timestamp>.db)")
+	_ = fs.Parse(args)
+
+	cfg, err := config.Load(*dataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	if *out == "" {
+		*out = filepath.Join(cfg.DataDir, "backups", "phleet-"+time.Now().Format("20060102-150405")+".db")
+	}
+	abs, err := filepath.Abs(*out)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	st, err := store.Open(cfg.DBPath())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	defer st.Close()
+	if err := st.Backup(abs); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	fmt.Println(abs)
 	return 0
 }
 

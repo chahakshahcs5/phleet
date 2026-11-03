@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -24,9 +26,13 @@ func (a *Agent) tunnelLoop(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		start := time.Now()
 		err := a.runTunnel(ctx)
 		if ctx.Err() != nil {
 			return
+		}
+		if time.Since(start) > 60*time.Second {
+			backoff = time.Second
 		}
 		a.log.Warn("data tunnel lost", "err", err, "retryIn", backoff)
 		select {
@@ -42,6 +48,15 @@ func (a *Agent) tunnelLoop(ctx context.Context) {
 }
 
 func (a *Agent) runTunnel(ctx context.Context) error {
+	// The data tunnel must use the token issued in hello.ack, not the shared
+	// enrollment token left over on first install. Wait briefly for the control
+	// loop to process the ack before dialing.
+	select {
+	case <-a.helloAck:
+	case <-time.After(2 * time.Second):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	u, err := url.Parse(a.cfg.URL)
 	if err != nil {
 		return err
@@ -51,7 +66,7 @@ func (a *Agent) runTunnel(ctx context.Context) error {
 	ws, resp, err := websocket.Dial(ctx, u.String(), &websocket.DialOptions{
 		HTTPClient: a.httpClient,
 		HTTPHeader: http.Header{
-			"Authorization":   []string{"Bearer " + a.cfg.Token},
+			"Authorization":   []string{"Bearer " + a.currentToken()},
 			"X-Phleet-Server": []string{a.cfg.ID},
 		},
 	})
@@ -75,9 +90,42 @@ func (a *Agent) runTunnel(ctx context.Context) error {
 	a.setTunnelSession(sess)
 	defer a.setTunnelSession(nil)
 	a.log.Info("data tunnel connected")
-	tunnel.ServeStreams(sess, a.portAllowed)
+	tunnel.ServeStreamsWithFiles(sess, a.portAllowed, a.serveFileStream)
 	_ = sess.Close()
 	return errors.New("tunnel closed")
+}
+
+// serveFileStream streams one file from the sandboxed home directory. The
+// control plane writes the path in a RequestHeader and reads the framed size
+// followed by raw bytes, so a large download never has to be base64-encoded
+// or held in memory on either side.
+func (a *Agent) serveFileStream(stream *yamux.Stream, req tunnel.RequestHeader) error {
+	fail := func(status int, msg string) error {
+		_ = tunnel.WriteFrame(stream, tunnel.ResponseHeader{Status: status, Error: msg})
+		return errors.New(msg)
+	}
+	abs, err := a.resolve(req.Path)
+	if err != nil {
+		return fail(http.StatusForbidden, err.Error())
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return fail(http.StatusNotFound, err.Error())
+	}
+	if info.IsDir() {
+		return fail(http.StatusBadRequest, "path is a directory")
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return fail(http.StatusInternalServerError, err.Error())
+	}
+	defer f.Close()
+	_ = stream.SetDeadline(time.Time{})
+	if err := tunnel.WriteFrame(stream, tunnel.ResponseHeader{Status: http.StatusOK, ContentLength: info.Size()}); err != nil {
+		return err
+	}
+	_, err = io.CopyN(stream, f, info.Size())
+	return err
 }
 
 // portAllowed ensures the control plane can only reach supervised app ports.

@@ -205,8 +205,10 @@ func (s *Server) addReplicas(p model.Project, states []placement.Server, active 
 	}
 	deployed := 0
 	for _, serverID := range plan {
+		s.portMu.Lock()
 		port, err := s.allocatePort(serverID)
 		if err != nil {
+			s.portMu.Unlock()
 			s.log.Warn("reconcile: allocate port", "server", serverID, "err", err)
 			continue
 		}
@@ -214,7 +216,9 @@ func (s *Server) addReplicas(p model.Project, states []placement.Server, active 
 			ProjectID: p.ID, ServerID: serverID, Port: port, Status: "pending", Desired: "running",
 			UpdatedAt: time.Now().Unix(),
 		}
-		if err := s.st.UpsertPlacement(pl); err != nil {
+		err = s.st.UpsertPlacement(pl)
+		s.portMu.Unlock()
+		if err != nil {
 			s.log.Warn("reconcile: add placement", "err", err)
 			continue
 		}

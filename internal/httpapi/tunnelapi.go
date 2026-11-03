@@ -17,14 +17,13 @@ import (
 // handleAgentData accepts the yamux-over-WebSocket data connection. The agent
 // dials it after the control connection is up.
 func (s *Server) handleAgentData(w http.ResponseWriter, r *http.Request) {
-	tok := bearer(r)
-	if tok == "" || (!secureEq(tok, s.cfg.AgentToken) && !secureEq(tok, s.cfg.AdminToken)) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
 	serverID := strings.TrimSpace(r.Header.Get("X-Phleet-Server"))
 	if serverID == "" {
 		http.Error(w, "missing X-Phleet-Server", http.StatusBadRequest)
+		return
+	}
+	if !s.agentServerAuthed(bearer(r), serverID) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
@@ -55,7 +54,10 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	if s.proxyProject(w, r) {
 		return
 	}
-	s.mux.ServeHTTP(w, r)
+	// Panel and agent routes get the security headers and the cross-site
+	// guard. Proxied user apps deliberately do not inherit the panel's CSP or
+	// frame policy.
+	s.panel.ServeHTTP(w, r)
 }
 
 // storageMaxBody keeps an S3 request under Cloudflare's 100 MB per-request

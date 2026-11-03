@@ -49,6 +49,7 @@ type tunnelManager struct {
 	intentional  bool
 	binary       string
 	lastErr      string
+	startedAt    time.Time
 	restartDelay time.Duration
 	restartTimer *time.Timer
 }
@@ -215,6 +216,7 @@ func (m *tunnelManager) startProcess() error {
 	m.intentional = false
 	m.binary = binary
 	m.lastErr = ""
+	m.startedAt = time.Now()
 	m.restartDelay = 2 * time.Second
 	m.mu.Unlock()
 	m.log.Info("tunnel process started", "pid", cmd.Process.Pid, "binary", binary)
@@ -242,6 +244,9 @@ func (m *tunnelManager) waitProcess(cmd *exec.Cmd, logFile *os.File) {
 		} else {
 			m.lastErr = "cloudflared exited"
 		}
+	}
+	if time.Since(m.startedAt) > 60*time.Second {
+		m.restartDelay = 2 * time.Second
 	}
 	delay := m.restartDelay
 	if delay <= 0 {

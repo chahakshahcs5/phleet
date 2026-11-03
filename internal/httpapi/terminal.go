@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
@@ -28,6 +29,14 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !s.hub.Online(id) {
 		apiErr(w, 409, hub.ErrOffline)
+		return
+	}
+	// A browser always sends Origin on a WebSocket handshake. Reject sibling
+	// subdomains so a compromised project cannot open a shell with the panel
+	// cookie. Non-browser clients without Origin are allowed (they still need
+	// the panel credential).
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" && !s.originAllowed(origin, r.Host) {
+		http.Error(w, "origin is not allowed", http.StatusForbidden)
 		return
 	}
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})

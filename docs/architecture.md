@@ -72,6 +72,7 @@ Request/response is correlated by `id` → `replyTo`. Binary payloads (PTY chunk
 | Type | Direction | Purpose |
 |---|---|---|
 | `hello` | agent → CP | identity, hostname, arch, version, capability map |
+| `hello.ack` | CP → agent | confirms registration and, on first enrollment, delivers the per-device token the agent persists to `agent.token` |
 | `heartbeat` | agent → CP | metrics + supervised app states every 5 s |
 | `exec` | CP → agent | run a shell command with timeout |
 | `pty.open/data/resize/close` | both | terminal lifecycle, raw bytes |
@@ -353,7 +354,7 @@ is kept for 90 days. Thresholds are editable at runtime; notifications go to a T
 | Boundary | Control |
 |---|---|
 | Public → panel | Cloudflare Access (recommended) + token login with signed, HttpOnly, SameSite=Lax cookie (30 days) |
-| Agent → control plane | shared bearer token, compared in constant time; one token per fleet today |
+| Agent → control plane | the shared token enrolls a phone once; the control plane then issues a per-device token (stored as a SHA-256 hash) that the agent uses for control, data, source and backup connections. Tokens are compared in constant time, are never accepted by the panel API, and are passed by file (`--token-file`) rather than argv |
 | Panel → files | paths resolved with `EvalSymlinks` and checked against allowed roots on every operation; root directories cannot be deleted |
 | Panel → shell | full shell as the Termux user, by design; the UI is the trust boundary |
 | Host header | after setup, unknown public hostnames return 404 instead of the panel; loopback and private IPs stay allowed; known project hosts are proxied before the panel mux |
@@ -367,7 +368,7 @@ is kept for 90 days. Thresholds are editable at runtime; notifications go to a T
 | Data at rest | SQLite and tokens under `%ProgramData%\phleet`, outside OneDrive; project env encrypted with AES-256-GCM; tokens are file-permission protected |
 | Audit | connection, exec, file write/upload/delete, terminal, project create/delete and deploy lifecycle events are recorded |
 
-Known gaps (acceptable for a personal fleet, not for a team): shared agent token, no per-user accounts or RBAC, no CSRF tokens (SameSite + JSON-only mitigates), no per-project secrets scoping beyond the env map.
+Known gaps (acceptable for a personal fleet, not for a team): the enrollment token is still shared (but cannot re-enroll an existing device), no per-user accounts or RBAC, no per-session CSRF token (state-changing requests are Origin-checked and JSON endpoints require `Content-Type: application/json`, which forces a preflight), no per-project secrets scoping beyond the env map. Apps run as the same Unix user as the agent on Termux, so stronger workload isolation is still on the roadmap.
 
 ## 10. Failure model
 

@@ -141,23 +141,29 @@ fi
 say "agent $("$BIN" --version)"
 
 umask 077
+sq() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; }
 cat > "$HOME/.phleet/agent.env" <<EOF
-PHLEET_URL=$SERVER
-PHLEET_TOKEN=$TOKEN
-PHLEET_NAME=$NAME
-PHLEET_EXTRA_ARGS=$ROOT_ARGS
-SSL_CERT_FILE=$PREFIX/etc/tls/cert.pem
+PHLEET_URL='$(sq "$SERVER")'
+PHLEET_NAME='$(sq "$NAME")'
+PHLEET_EXTRA_ARGS='$(sq "$ROOT_ARGS")'
+SSL_CERT_FILE='$(sq "$PREFIX/etc/tls/cert.pem")'
 EOF
 chmod 600 "$HOME/.phleet/agent.env"
+# Keep the token in a file, not in the agent's argv. Deployed apps share this
+# Unix user, so this is defence in depth rather than perfect isolation.
+printf '%s\n' "$TOKEN" > "$HOME/.phleet/agent.token"
+chmod 600 "$HOME/.phleet/agent.token"
 
 cat > "$HOME/.phleet/run-agent.sh" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/sh
 set -eu
 . "$HOME/.phleet/agent.env"
+# Old installs kept the token in agent.env; do not leak it to child processes.
+unset PHLEET_TOKEN PHLEET_TOKEN_FILE
 # shellcheck disable=SC2086
 exec "$HOME/.phleet/bin/phleet-agent" \
   --server "$PHLEET_URL" \
-  --token "$PHLEET_TOKEN" \
+  --token-file "$HOME/.phleet/agent.token" \
   --name "$PHLEET_NAME" \
   $PHLEET_EXTRA_ARGS
 EOF
