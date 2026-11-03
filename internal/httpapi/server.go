@@ -17,8 +17,10 @@ import (
 	"sync"
 	"time"
 
+	"phleet/internal/auth"
 	"phleet/internal/config"
 	"phleet/internal/hub"
+	"phleet/internal/model"
 	"phleet/internal/store"
 	"phleet/internal/webui"
 )
@@ -199,6 +201,11 @@ func (s *Server) routes() {
 	api.HandleFunc("POST /totp/setup", s.handleSetupTOTP)
 	api.HandleFunc("POST /totp/enable", s.handleEnableTOTP)
 	api.HandleFunc("POST /totp/disable", s.handleDisableTOTP)
+	api.HandleFunc("GET /users", s.handleListUsers)
+	api.HandleFunc("POST /users", s.handleCreateUser)
+	api.HandleFunc("PATCH /users/{id}", s.handleUpdateUser)
+	api.HandleFunc("DELETE /users/{id}", s.handleDeleteUser)
+	api.HandleFunc("POST /users/{id}/password", s.handleResetUserPassword)
 	api.HandleFunc("GET /api-tokens", s.handleListAPITokens)
 	api.HandleFunc("POST /api-tokens", s.handleCreateAPIToken)
 	api.HandleFunc("DELETE /api-tokens/{id}", s.handleDeleteAPIToken)
@@ -334,11 +341,42 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 
 // ---- auth ----
 
-func (s *Server) sign(exp int64) string {
+func (s *Server) signPayload(payload string) string {
 	mac := hmac.New(sha256.New, s.cfg.SessionKey)
-	payload := "phleet|" + strconv.FormatInt(exp, 10)
 	mac.Write([]byte(payload))
 	return payload + "|" + hex.EncodeToString(mac.Sum(nil))
+}
+
+func (s *Server) sign(exp int64) string {
+	return s.signPayload("phleet|" + strconv.FormatInt(exp, 10))
+}
+
+func (s *Server) userSession(userID string, exp int64) string {
+	return s.signPayload("phleet|user|" + userID + "|" + strconv.FormatInt(exp, 10))
+}
+
+func (s *Server) validPayload(v string, wantLen int) bool {
+	parts := strings.Split(v, "|")
+	if len(parts) != wantLen {
+		return false
+	}
+	expect := s.signPayload(strings.Join(parts[:len(parts)-1], "|"))
+	return subtle.ConstantTimeCompare([]byte(expect), []byte(v)) == 1
+}
+
+func (s *Server) sessionUserID(v string) (string, bool) {
+	parts := strings.Split(v, "|")
+	if len(parts) != 5 || parts[0] != "phleet" || parts[1] != "user" {
+		return "", false
+	}
+	exp, err := strconv.ParseInt(parts[3], 10, 64)
+	if err != nil || time.Now().Unix() > exp {
+		return "", false
+	}
+	if !s.validPayload(v, 5) {
+		return "", false
+	}
+	return parts[2], true
 }
 
 func (s *Server) validSession(v string) bool {
@@ -514,7 +552,33 @@ func (s *Server) panelRole(r *http.Request) string {
 	if s.validSession(c.Value) {
 		return "admin"
 	}
+	if id, ok := s.sessionUserID(c.Value); ok {
+		if u, err := s.st.GetUser(id); err == nil && !u.Disabled {
+			if u.Role == "admin" {
+				return "admin"
+			}
+			return "viewer"
+		}
+	}
 	return ""
+}
+
+// currentUser returns the user behind the session cookie. The admin token and
+// legacy admin session have no user row.
+func (s *Server) currentUser(r *http.Request) (model.User, bool) {
+	c, err := r.Cookie("phleet_session")
+	if err != nil {
+		return model.User{}, false
+	}
+	id, ok := s.sessionUserID(c.Value)
+	if !ok {
+		return model.User{}, false
+	}
+	u, err := s.st.GetUser(id)
+	if err != nil || u.Disabled {
+		return model.User{}, false
+	}
+	return u, true
 }
 
 func (s *Server) panelAuthed(r *http.Request) bool {
@@ -529,12 +593,14 @@ func (s *Server) requirePanelAuth(next http.Handler) http.Handler {
 			return
 		}
 		if role != "admin" {
-			if r.Method != http.MethodGet && r.Method != http.MethodHead {
-				writeJSON(w, http.StatusForbidden, map[string]any{"error": "read-only API token"})
-				return
-			}
-			if !viewerPathAllowed(r.URL.Path) {
-				writeJSON(w, http.StatusForbidden, map[string]any{"error": "endpoint requires an admin token"})
+			_, isUser := s.currentUser(r)
+			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+				if !viewerPathAllowed(r.URL.Path) && !(isUser && r.URL.Path == "/totp") {
+					writeJSON(w, http.StatusForbidden, map[string]any{"error": "endpoint requires an admin token"})
+					return
+				}
+			} else if !isUser || !viewerWriteAllowed(r.URL.Path) {
+				writeJSON(w, http.StatusForbidden, map[string]any{"error": "read-only account"})
 				return
 			}
 		}
@@ -557,11 +623,35 @@ func (s *Server) requirePanelOrAgent(next http.Handler) http.Handler {
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Token string `json:"token"`
-		Code  string `json:"code"`
+		Token    string `json:"token"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Code     string `json:"code"`
 	}
 	if err := readJSON(r, &body, 4096); err != nil {
 		writeJSON(w, 400, map[string]any{"error": "invalid body"})
+		return
+	}
+	exp := time.Now().Add(30 * 24 * time.Hour).Unix()
+	if strings.TrimSpace(body.Username) != "" {
+		u, err := s.st.GetUserByUsername(strings.TrimSpace(body.Username))
+		if err != nil || u.Disabled || !auth.VerifyPassword(body.Password, u.PasswordHash) {
+			time.Sleep(250 * time.Millisecond)
+			writeJSON(w, 401, map[string]any{"error": "wrong username or password"})
+			return
+		}
+		ok, err := s.validateUserTOTP(u, body.Code)
+		if err != nil {
+			writeJSON(w, 500, map[string]any{"error": "2FA configuration is unreadable"})
+			return
+		}
+		if !ok {
+			time.Sleep(250 * time.Millisecond)
+			writeJSON(w, 401, map[string]any{"error": "invalid 2FA code"})
+			return
+		}
+		s.setSessionCookie(w, r, s.userSession(u.ID, exp), exp)
+		writeJSON(w, 200, map[string]any{"ok": true, "version": config.Version, "role": u.Role, "username": u.Username})
 		return
 	}
 	if !secureEq(strings.TrimSpace(body.Token), s.cfg.AdminToken) {
@@ -581,10 +671,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	exp := time.Now().Add(30 * 24 * time.Hour).Unix()
+	s.setSessionCookie(w, r, s.sign(exp), exp)
+	writeJSON(w, 200, map[string]any{"ok": true, "version": config.Version, "role": "admin"})
+}
+
+func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, value string, exp int64) {
 	c := &http.Cookie{
 		Name:     "phleet_session",
-		Value:    s.sign(exp),
+		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
@@ -595,7 +689,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		c.Secure = true
 	}
 	http.SetCookie(w, c)
-	writeJSON(w, 200, map[string]any{"ok": true, "version": config.Version})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -607,12 +700,18 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	publicURL, _ := s.Edge()
+	username := "admin"
+	if u, ok := s.currentUser(r); ok {
+		username = u.Username
+	}
 	writeJSON(w, 200, map[string]any{
 		"authenticated": true,
 		"version":       config.Version,
 		"dataDir":       s.cfg.DataDir,
 		"publicUrl":     publicURL,
 		"agentsOnline":  s.hub.Count(),
+		"role":          s.panelRole(r),
+		"username":      username,
 	})
 }
 

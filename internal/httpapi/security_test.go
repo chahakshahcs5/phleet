@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"phleet/internal/auth"
 	"phleet/internal/config"
 	"phleet/internal/model"
 	"phleet/internal/secrets"
@@ -188,6 +190,60 @@ func TestPerDeviceAgentEnrollment(t *testing.T) {
 	if ok, tok := s.agentHelloAuth(s.cfg.AgentToken, "legacy-1", false); !ok || tok != "" {
 		t.Fatalf("legacy agent should connect without enrollment: ok=%v token=%q", ok, tok)
 	}
+}
+
+func TestUserPasswordLoginAndRole(t *testing.T) {
+	s := testServer(t)
+	hash, err := auth.HashPassword("password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []model.User{
+		{ID: "u-viewer", Username: "viewer", PasswordHash: hash, Role: "viewer"},
+		{ID: "u-admin", Username: "admin", PasswordHash: hash, Role: "admin"},
+	} {
+		if err := s.st.CreateUser(u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := httptest.NewServer(s.Handler())
+	t.Cleanup(srv.Close)
+	login := func(username string) *http.Client {
+		jar, _ := cookiejar.New(nil)
+		client := &http.Client{Jar: jar}
+		body := `{"username":"` + username + `","password":"password123"}`
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/login", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("login %s = %d", username, resp.StatusCode)
+		}
+		return client
+	}
+	viewer := login("viewer")
+	resp, err := viewer.Get(srv.URL + "/api/projects")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("viewer GET projects = %v %d", err, resp.StatusCode)
+	}
+	resp.Body.Close()
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/projects", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = viewer.Do(req)
+	if err != nil || resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("viewer POST projects = %v %d", err, resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	admin := login("admin")
+	resp, err = admin.Get(srv.URL + "/api/users")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin GET users = %v %d", err, resp.StatusCode)
+	}
+	resp.Body.Close()
 }
 
 func TestViewerAPITokenIsReadOnly(t *testing.T) {

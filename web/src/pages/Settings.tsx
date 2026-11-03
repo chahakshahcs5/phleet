@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Cloud, KeyRound, Palette, Server, Shield, Smartphone, TerminalSquare, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { api } from '../api'
-import type { APIToken } from '../types'
+import type { APIToken, User } from '../types'
 import ThemeToggle from '../components/ThemeToggle'
 import ThemeStudio from '../components/ThemeStudio'
 import TunnelCard from '../components/TunnelCard'
@@ -17,6 +17,11 @@ export default function Settings() {
   const [createdToken, setCreatedToken] = useState('')
   const [totpSetup, setTotpSetup] = useState<{ secret: string; url: string } | null>(null)
   const [totpCode, setTotpCode] = useState('')
+  const [newUsername, setNewUsername] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [newRole, setNewRole] = useState<'admin' | 'viewer'>('viewer')
+  const [resetUser, setResetUser] = useState<User | null>(null)
+  const [resetPassword, setResetPassword] = useState('')
   const base = me.data?.publicUrl || 'https://fleet.example.com'
   const dataDir = me.data?.dataDir || '%ProgramData%\\phleet'
 
@@ -34,6 +39,34 @@ export default function Settings() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['api-tokens'] }),
   })
   const tokenList: APIToken[] = tokens.data?.tokens ?? []
+
+  const users = useQuery({ queryKey: ['users'], queryFn: api.users })
+  const createUser = useMutation({
+    mutationFn: () =>
+      api.createUser({ username: newUsername.trim(), password: newPassword, role: newRole }),
+    onSuccess: () => {
+      setNewUsername('')
+      setNewPassword('')
+      qc.invalidateQueries({ queryKey: ['users'] })
+    },
+  })
+  const updateUser = useMutation({
+    mutationFn: (args: { id: string; role?: 'admin' | 'viewer'; disabled?: boolean }) =>
+      api.updateUser(args.id, { role: args.role, disabled: args.disabled }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
+  })
+  const deleteUser = useMutation({
+    mutationFn: (id: string) => api.deleteUser(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
+  })
+  const resetUserPassword = useMutation({
+    mutationFn: () => (resetUser ? api.resetUserPassword(resetUser.id, resetPassword) : Promise.resolve({ ok: false })),
+    onSuccess: () => {
+      setResetUser(null)
+      setResetPassword('')
+    },
+  })
+  const userList: User[] = users.data?.users ?? []
 
   const totp = useQuery({ queryKey: ['totp'], queryFn: api.totp })
   const setupTOTP = useMutation({
@@ -107,6 +140,119 @@ export default function Settings() {
           Tokens are generated once and never leave the host through the API. Rotate by deleting the file and restarting
           phleetd — every agent must be re-bootstrapped afterwards.
         </p>
+      </Card>
+
+      <Card className="p-4">
+        <div className="flex items-center gap-2 text-[10px] font-medium tracking-widest text-zinc-500 uppercase">
+          <Shield size={12} /> Users
+        </div>
+        <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
+          Admins can mutate everything. Viewers are read-only. Each account can enable its own TOTP under Security.
+        </p>
+        <div className="mt-3 flex flex-wrap items-end gap-2">
+          <label className="flex-1">
+            <span className="text-[10px] text-zinc-500">Username</span>
+            <input
+              className="mt-1 h-9 w-full rounded-lg border border-zinc-800 bg-zinc-950/70 px-3 text-xs text-zinc-200 outline-none focus:border-emerald-400/40"
+              value={newUsername}
+              onChange={(e) => setNewUsername(e.target.value)}
+              placeholder="alex"
+            />
+          </label>
+          <label className="flex-1">
+            <span className="text-[10px] text-zinc-500">Password</span>
+            <input
+              type="password"
+              className="mt-1 h-9 w-full rounded-lg border border-zinc-800 bg-zinc-950/70 px-3 text-xs text-zinc-200 outline-none focus:border-emerald-400/40"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              placeholder="at least 8 characters"
+            />
+          </label>
+          <label>
+            <span className="text-[10px] text-zinc-500">Role</span>
+            <select
+              className="mt-1 h-9 rounded-lg border border-zinc-800 bg-zinc-950/70 px-3 text-xs text-zinc-200 outline-none"
+              value={newRole}
+              onChange={(e) => setNewRole(e.target.value as 'admin' | 'viewer')}
+            >
+              <option value="viewer">viewer</option>
+              <option value="admin">admin</option>
+            </select>
+          </label>
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={!newUsername.trim() || newPassword.length < 8 || createUser.isPending}
+            onClick={() => createUser.mutate()}
+          >
+            Add user
+          </Button>
+        </div>
+        {createUser.isError ? <div className="mt-2 text-[11px] text-red-400">{String(createUser.error)}</div> : null}
+        <div className="mt-3 divide-y divide-zinc-800/60">
+          {userList.map((u) => (
+            <div key={u.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+              <div className="flex items-center gap-2 text-[11px] text-zinc-300">
+                <span className="font-medium">{u.username}</span>
+                <Badge tone={u.role === 'admin' ? 'warn' : 'neutral'}>{u.role}</Badge>
+                {u.disabled ? <Badge tone="bad">disabled</Badge> : null}
+              </div>
+              <div className="flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => updateUser.mutate({ id: u.id, role: u.role === 'admin' ? 'viewer' : 'admin' })}
+                >
+                  {u.role === 'admin' ? 'Make viewer' : 'Make admin'}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => updateUser.mutate({ id: u.id, disabled: !u.disabled })}
+                >
+                  {u.disabled ? 'Enable' : 'Disable'}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setResetUser(u)}>
+                  Password
+                </Button>
+                <Button size="icon" variant="ghost" title="Delete user" onClick={() => deleteUser.mutate(u.id)}>
+                  <Trash2 size={12} />
+                </Button>
+              </div>
+            </div>
+          ))}
+          {userList.length === 0 ? <div className="py-3 text-[11px] text-zinc-600">No users yet.</div> : null}
+        </div>
+        {resetUser ? (
+          <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950/70 p-3">
+            <div className="text-[10px] text-zinc-500">New password for {resetUser.username}</div>
+            <div className="mt-2 flex gap-2">
+              <input
+                type="password"
+                value={resetPassword}
+                onChange={(e) => setResetPassword(e.target.value)}
+                placeholder="at least 8 characters"
+                className="h-9 flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 text-xs text-zinc-200 outline-none"
+              />
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={resetPassword.length < 8 || resetUserPassword.isPending}
+                onClick={() => resetUserPassword.mutate()}
+              >
+                Save
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setResetUser(null)}>
+                Cancel
+              </Button>
+            </div>
+            {resetUserPassword.isError ? (
+              <div className="mt-2 text-[11px] text-red-400">{String(resetUserPassword.error)}</div>
+            ) : null}
+          </div>
+        ) : null}
+        {deleteUser.isError ? <div className="mt-2 text-[11px] text-red-400">{String(deleteUser.error)}</div> : null}
       </Card>
 
       <Card className="p-4">

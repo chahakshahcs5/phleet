@@ -28,6 +28,7 @@ import type {
   ServiceInput,
   SetupInfo,
   TunnelStatus,
+  User,
 } from './types'
 
 export class ApiError extends Error {
@@ -66,8 +67,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 export const api = {
   meta: () => request<Meta>('/api/meta'),
   me: () => request<Me>('/api/me'),
-  login: (token: string, code = '') =>
-    request<{ ok: boolean }>('/api/login', { method: 'POST', body: JSON.stringify({ token, code }) }),
+  login: (body: { token?: string; username?: string; password?: string; code?: string }) =>
+    request<{ ok: boolean }>('/api/login', { method: 'POST', body: JSON.stringify(body) }),
   logout: () => request<{ ok: boolean }>('/api/logout', { method: 'POST' }),
 
   servers: () =>
@@ -151,6 +152,17 @@ export const api = {
     async?: boolean
   }) => request<ProvisionResult>('/api/servers/provision', { method: 'POST', body: JSON.stringify(body) }),
   job: (id: string) => request<{ job: Job }>(`/api/jobs/${id}`),
+  users: () => request<{ users: User[] }>('/api/users'),
+  createUser: (body: { username: string; password: string; role: 'admin' | 'viewer' }) =>
+    request<{ user: User }>('/api/users', { method: 'POST', body: JSON.stringify(body) }),
+  updateUser: (id: string, body: { role?: 'admin' | 'viewer'; disabled?: boolean }) =>
+    request<{ user: User }>(`/api/users/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  resetUserPassword: (id: string, password: string) =>
+    request<{ ok: boolean }>(`/api/users/${id}/password`, {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+  deleteUser: (id: string) => request<{ ok: boolean }>(`/api/users/${id}`, { method: 'DELETE' }),
   apiTokens: () => request<{ tokens: APIToken[] }>('/api/api-tokens'),
   createAPIToken: (body: { name: string; role: 'admin' | 'viewer' }) =>
     request<{ token: string; apiToken: APIToken }>('/api/api-tokens', {

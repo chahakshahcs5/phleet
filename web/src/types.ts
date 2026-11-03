@@ -124,6 +124,8 @@ export interface Me {
   dataDir: string
   publicUrl: string
   agentsOnline: number
+  role?: 'admin' | 'viewer'
+  username?: string
 }
 
 export interface Meta {
@@ -414,6 +416,15 @@ export interface ProvisionResult {
   output?: string
   error?: string
   jobId?: string
+}
+
+export interface User {
+  id: string
+  username: string
+  role: 'admin' | 'viewer'
+  disabled: boolean
+  createdAt: number
+  updatedAt: number
 }
 
 export interface APIToken {
