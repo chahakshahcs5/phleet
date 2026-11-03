@@ -62,6 +62,7 @@ type Project struct {
 	StartCmd        string `json:"startCmd"`
 	HealthPath      string `json:"healthPath"`
 	Hostname        string `json:"hostname"`
+	CustomHostname  string `json:"customHostname,omitempty"`
 	Selector        string `json:"selector"`
 	Replicas        int    `json:"replicas"`
 	PinnedServer    string `json:"pinnedServer"`

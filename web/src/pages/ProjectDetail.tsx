@@ -202,7 +202,7 @@ export default function ProjectDetail() {
                 rel="noreferrer"
                 className="flex items-center gap-1 font-mono text-zinc-400 hover:text-emerald-300"
               >
-                <Globe size={10} /> {project.hostname} <ExternalLink size={9} />
+                <Globe size={10} /> {project.customHostname || project.hostname} <ExternalLink size={9} />
               </a>
               <span className="flex items-center gap-1">
                 <Layers size={10} /> {onlineReplicas(project)}/{project.replicas} replicas online
@@ -481,7 +481,7 @@ function Overview({ project, onDeploy, canDeploy }: { project: ProjectView; onDe
         <div className="mt-4 divide-y divide-zinc-800/60">
           <KeyValue label="URL">
             <a href={project.url} target="_blank" rel="noreferrer" className="text-emerald-300/90 hover:text-emerald-200">
-              {project.hostname}
+              {project.customHostname || project.hostname}
             </a>
           </KeyValue>
           <KeyValue label="Replicas">{`${project.placements.length} / ${project.replicas}`}</KeyValue>
@@ -717,6 +717,7 @@ function SettingsTab({
     buildCmd: project.buildCmd,
     startCmd: project.startCmd,
     healthPath: project.healthPath,
+    customHostname: project.customHostname ?? '',
     envText: envToString(project.env),
     replicas: project.replicas,
     selector: project.selector,
@@ -750,6 +751,7 @@ function SettingsTab({
         buildCmd: form.buildCmd,
         startCmd: form.startCmd,
         healthPath: form.healthPath,
+        customHostname: form.customHostname,
         env: parseEnv(form.envText),
         replicas: form.replicas,
         selector: form.selector,
@@ -793,6 +795,18 @@ function SettingsTab({
           <div>
             <div className={caption}>Health path</div>
             <input className={`${field} mt-1 font-mono`} value={form.healthPath} onChange={(e) => setForm({ ...form, healthPath: e.target.value })} />
+          </div>
+          <div className="sm:col-span-2">
+            <div className={caption}>Custom domain (optional)</div>
+            <input
+              className={`${field} mt-1 font-mono`}
+              value={form.customHostname}
+              onChange={(e) => setForm({ ...form, customHostname: e.target.value })}
+              placeholder="app.customer.com"
+            />
+            <p className="mt-1 text-[10px] leading-relaxed text-zinc-600">
+              Point a proxied CNAME at the Cloudflare tunnel. The wildcard record is not used for custom domains.
+            </p>
           </div>
           <div className="sm:col-span-2">
             <div className={caption}>Build command</div>

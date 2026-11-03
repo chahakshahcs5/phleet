@@ -28,7 +28,10 @@ const (
 	maxReplicas    = 5
 )
 
-var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,47}$`)
+var (
+	slugPattern     = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,47}$`)
+	hostnamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
+)
 
 var reservedSlugs = map[string]bool{
 	"fleet": true, "www": true, "api": true, "admin": true, "mail": true,
@@ -86,10 +89,14 @@ func (s *Server) buildProjectView(p model.Project, withEnv bool) projectView {
 		}
 		return v
 	}
+	host := p.Hostname
+	if p.CustomHostname != "" {
+		host = p.CustomHostname
+	}
 	if _, fleetHost := s.Edge(); fleetHost != "" {
-		v.URL = "https://" + p.Hostname
+		v.URL = "https://" + host
 	} else {
-		v.URL = "http://" + p.Hostname
+		v.URL = "http://" + host
 	}
 	placements, _ := s.st.ListProjectPlacements(p.ID)
 	sort.Slice(placements, func(i, j int) bool { return placements[i].ServerID < placements[j].ServerID })
@@ -258,6 +265,31 @@ func (s *Server) projectSourceOnServer(p model.Project, serverID string) bool {
 		}
 	}
 	return false
+}
+
+// normalizeCustomHostname validates an externally managed hostname and checks
+// it is not already used by another project or addon.
+func (s *Server) normalizeCustomHostname(v, projectID string) (string, error) {
+	v = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(v, ".")))
+	if v == "" {
+		return "", nil
+	}
+	if len(v) > 253 || !hostnamePattern.MatchString(v) {
+		return "", errors.New("custom domain must be a valid lowercase hostname")
+	}
+	if v == "localhost" || isPrivateHost(v) {
+		return "", errors.New("custom domain must be a public hostname")
+	}
+	if _, fleetHost := s.Edge(); fleetHost != "" && strings.EqualFold(v, fleetHost) {
+		return "", errors.New("custom domain cannot be the panel hostname")
+	}
+	if p, err := s.st.GetProjectByHostname(v); err == nil && p.ID != projectID {
+		return "", errors.New("custom domain is already used by another project")
+	}
+	if a, err := s.st.GetAddonByHostname(v); err == nil && a.ID != "" {
+		return "", errors.New("custom domain is already used by a service")
+	}
+	return v, nil
 }
 
 func (s *Server) allocatePort(serverID string) (int, error) {
@@ -511,21 +543,22 @@ type createServiceBody struct {
 }
 
 type createProjectBody struct {
-	Name         string              `json:"name"`
-	Slug         string              `json:"slug"`
-	Repo         string              `json:"repo"`
-	Branch       string              `json:"branch"`
-	BuildCmd     string              `json:"buildCmd"`
-	StartCmd     string              `json:"startCmd"`
-	HealthPath   string              `json:"healthPath"`
-	ServerID     string              `json:"serverId"`
-	PinnedServer string              `json:"pinnedServer"`
-	Selector     string              `json:"selector"`
-	Replicas     int                 `json:"replicas"`
-	SourceType   string              `json:"sourceType"`
-	Env          map[string]string   `json:"env"`
-	Stack        bool                `json:"stack"`
-	Services     []createServiceBody `json:"services"`
+	Name           string              `json:"name"`
+	Slug           string              `json:"slug"`
+	Repo           string              `json:"repo"`
+	Branch         string              `json:"branch"`
+	BuildCmd       string              `json:"buildCmd"`
+	StartCmd       string              `json:"startCmd"`
+	HealthPath     string              `json:"healthPath"`
+	CustomHostname string              `json:"customHostname"`
+	ServerID       string              `json:"serverId"`
+	PinnedServer   string              `json:"pinnedServer"`
+	Selector       string              `json:"selector"`
+	Replicas       int                 `json:"replicas"`
+	SourceType     string              `json:"sourceType"`
+	Env            map[string]string   `json:"env"`
+	Stack          bool                `json:"stack"`
+	Services       []createServiceBody `json:"services"`
 }
 
 func normalizeHealthPath(v string) string {
@@ -551,6 +584,10 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Stack || len(body.Services) > 0 {
+		if strings.TrimSpace(body.CustomHostname) != "" {
+			apiErr(w, 400, errors.New("custom domains are set per service, not on the stack"))
+			return
+		}
 		s.handleCreateStack(w, body)
 		return
 	}
@@ -574,6 +611,11 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	hostname := slug + "." + s.appSuffix()
 	if s.hostnameTaken(hostname) {
 		apiErr(w, 409, fmt.Errorf("hostname %s is already in use", hostname))
+		return
+	}
+	customHostname, err := s.normalizeCustomHostname(body.CustomHostname, "")
+	if err != nil {
+		apiErr(w, 400, err)
 		return
 	}
 
@@ -643,7 +685,8 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		ID: uuid.NewString(), Name: name, Slug: slug, Repo: repo,
 		Branch: branch, Runtime: "auto", BuildCmd: strings.TrimSpace(body.BuildCmd),
 		StartCmd: strings.TrimSpace(body.StartCmd), HealthPath: healthPath, Hostname: hostname,
-		Selector: placement.FormatSelector(sel), Replicas: replicas, PinnedServer: pinned,
+		CustomHostname: customHostname,
+		Selector:       placement.FormatSelector(sel), Replicas: replicas, PinnedServer: pinned,
 		SourceType: srcType, EnvEnc: envEnc, CreatedAt: time.Now().Unix(),
 	}
 	if err := s.st.CreateProject(p); err != nil {
@@ -832,16 +875,17 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name         *string            `json:"name"`
-		Repo         *string            `json:"repo"`
-		Branch       *string            `json:"branch"`
-		BuildCmd     *string            `json:"buildCmd"`
-		StartCmd     *string            `json:"startCmd"`
-		HealthPath   *string            `json:"healthPath"`
-		Env          *map[string]string `json:"env"`
-		Selector     *string            `json:"selector"`
-		Replicas     *int               `json:"replicas"`
-		PinnedServer *string            `json:"pinnedServer"`
+		Name           *string            `json:"name"`
+		Repo           *string            `json:"repo"`
+		Branch         *string            `json:"branch"`
+		BuildCmd       *string            `json:"buildCmd"`
+		StartCmd       *string            `json:"startCmd"`
+		HealthPath     *string            `json:"healthPath"`
+		CustomHostname *string            `json:"customHostname"`
+		Env            *map[string]string `json:"env"`
+		Selector       *string            `json:"selector"`
+		Replicas       *int               `json:"replicas"`
+		PinnedServer   *string            `json:"pinnedServer"`
 	}
 	if err := readJSON(r, &body, 1<<20); err != nil {
 		apiErr(w, 400, err)
@@ -871,6 +915,18 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 			hp = "/" + hp
 		}
 		p.HealthPath = hp
+	}
+	if body.CustomHostname != nil {
+		if p.Kind == "stack" && strings.TrimSpace(*body.CustomHostname) != "" {
+			apiErr(w, 400, errors.New("set a custom domain on a service, not on the stack"))
+			return
+		}
+		norm, err := s.normalizeCustomHostname(*body.CustomHostname, p.ID)
+		if err != nil {
+			apiErr(w, 400, err)
+			return
+		}
+		p.CustomHostname = norm
 	}
 	if body.Env != nil {
 		enc, err := s.encryptEnv(*body.Env)

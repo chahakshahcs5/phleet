@@ -168,6 +168,7 @@ export const api = {
     buildCmd: string
     startCmd: string
     healthPath: string
+    customHostname?: string
     serverId?: string
     selector?: string
     replicas?: number
@@ -183,6 +184,7 @@ export const api = {
     buildCmd: string
     startCmd: string
     healthPath: string
+    customHostname: string
     selector: string
     replicas: number
     pinnedServer: string

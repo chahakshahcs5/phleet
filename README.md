@@ -55,6 +55,7 @@ standbys all work.
 | Scheduling | 1–5 replicas per project, label selectors, pinned phones, health-based placement, automatic failover, manual rebalance |
 | Routing | `<slug>.<domain>` round-robins across running replicas through the agent tunnels; drained/offline replicas are skipped |
 | Env | Per-project variables, encrypted at rest with AES-256-GCM, injected into every replica |
+| Domains | Optional custom hostname per project/service; point a proxied CNAME at the tunnel and set it under Project → Settings |
 | Alerts | Offline, temperature, battery, disk, crash-loop, failed-deploy and database alerts; thresholds, ack, history, Telegram and webhook notifications |
 | Audit log | Cursor-paginated events (25–200 per page), action filter, search across action/target/detail, live refresh |
 | Edge | `phleet setup-cloudflare` creates the tunnel, wildcard DNS, ingress and the Windows service; config reloads every 15 s |

@@ -12,10 +12,10 @@ func (s *Store) CreateProject(p model.Project) error {
 		p.CreatedAt = now()
 	}
 	_, err := s.db.Exec(`INSERT INTO projects
-(id,name,slug,repo,branch,runtime,build_cmd,start_cmd,health_path,hostname,env_enc,selector,replicas,pinned_server,source_type,source_size,source_updated_at,parent_id,kind,stack_order,created_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+(id,name,slug,repo,branch,runtime,build_cmd,start_cmd,health_path,hostname,custom_hostname,env_enc,selector,replicas,pinned_server,source_type,source_size,source_updated_at,parent_id,kind,stack_order,created_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.ID, p.Name, p.Slug, p.Repo, p.Branch, p.Runtime, p.BuildCmd, p.StartCmd,
-		p.HealthPath, p.Hostname, p.EnvEnc, p.Selector, p.Replicas, p.PinnedServer,
+		p.HealthPath, p.Hostname, p.CustomHostname, p.EnvEnc, p.Selector, p.Replicas, p.PinnedServer,
 		sourceType(p.SourceType), p.SourceSize, p.SourceUpdatedAt, p.ParentID, kindOrDefault(p.Kind), p.StackOrder, p.CreatedAt)
 	return err
 }
@@ -36,9 +36,9 @@ func sourceType(v string) string {
 
 func (s *Store) UpdateProject(p model.Project) error {
 	_, err := s.db.Exec(`UPDATE projects SET name=?, repo=?, branch=?, runtime=?, build_cmd=?,
-start_cmd=?, health_path=?, hostname=?, env_enc=?, selector=?, replicas=?, pinned_server=?,
+start_cmd=?, health_path=?, hostname=?, custom_hostname=?, env_enc=?, selector=?, replicas=?, pinned_server=?,
 source_type=?, source_size=?, source_updated_at=?, parent_id=?, kind=?, stack_order=? WHERE id=?`,
-		p.Name, p.Repo, p.Branch, p.Runtime, p.BuildCmd, p.StartCmd, p.HealthPath, p.Hostname,
+		p.Name, p.Repo, p.Branch, p.Runtime, p.BuildCmd, p.StartCmd, p.HealthPath, p.Hostname, p.CustomHostname,
 		p.EnvEnc, p.Selector, p.Replicas, p.PinnedServer, sourceType(p.SourceType),
 		p.SourceSize, p.SourceUpdatedAt, p.ParentID, kindOrDefault(p.Kind), p.StackOrder, p.ID)
 	return err
@@ -53,7 +53,7 @@ func (s *Store) UpdateProjectSource(id, sourceType string, size, updatedAt int64
 func (s *Store) scanProject(row interface{ Scan(...any) error }) (model.Project, error) {
 	var p model.Project
 	err := row.Scan(&p.ID, &p.Name, &p.Slug, &p.Repo, &p.Branch, &p.Runtime, &p.BuildCmd,
-		&p.StartCmd, &p.HealthPath, &p.Hostname, &p.EnvEnc, &p.Selector, &p.Replicas, &p.PinnedServer,
+		&p.StartCmd, &p.HealthPath, &p.Hostname, &p.CustomHostname, &p.EnvEnc, &p.Selector, &p.Replicas, &p.PinnedServer,
 		&p.SourceType, &p.SourceSize, &p.SourceUpdatedAt, &p.ParentID, &p.Kind, &p.StackOrder, &p.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, ErrNotFound
@@ -61,7 +61,7 @@ func (s *Store) scanProject(row interface{ Scan(...any) error }) (model.Project,
 	return p, err
 }
 
-const projectCols = `id,name,slug,repo,branch,runtime,build_cmd,start_cmd,health_path,hostname,env_enc,selector,replicas,pinned_server,source_type,source_size,source_updated_at,parent_id,kind,stack_order,created_at`
+const projectCols = `id,name,slug,repo,branch,runtime,build_cmd,start_cmd,health_path,hostname,custom_hostname,env_enc,selector,replicas,pinned_server,source_type,source_size,source_updated_at,parent_id,kind,stack_order,created_at`
 
 func (s *Store) GetProject(id string) (model.Project, error) {
 	return s.scanProject(s.db.QueryRow(`SELECT `+projectCols+` FROM projects WHERE id=?`, id))
@@ -72,7 +72,7 @@ func (s *Store) GetProjectBySlug(slug string) (model.Project, error) {
 }
 
 func (s *Store) GetProjectByHostname(host string) (model.Project, error) {
-	return s.scanProject(s.db.QueryRow(`SELECT `+projectCols+` FROM projects WHERE hostname=?`, host))
+	return s.scanProject(s.db.QueryRow(`SELECT `+projectCols+` FROM projects WHERE hostname=? OR custom_hostname=?`, host, host))
 }
 
 func (s *Store) ListProjects() ([]model.Project, error) {

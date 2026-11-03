@@ -334,6 +334,7 @@ is kept for 90 days. Thresholds are editable at runtime; notifications go to a T
 - DNS: `fleet.<domain>` and `*.<domain>` both CNAME to `<tunnel-id>.cfargotunnel.com`, proxied.
 - Ingress: `fleet.<domain> → 127.0.0.1:8080`, then a catch-all to the same place. The control plane decides.
 - Project URLs use **first-level** subdomains (`api.example.com`) because Universal SSL covers `example.com` and `*.example.com`, not `*.apps.example.com`. Advanced Certificate Manager removes that constraint later.
+- Custom domains set on a project/service are routed by `Host` over the same catch-all ingress. The operator adds a proxied CNAME in the custom domain's Cloudflare zone; phleet does not issue certificates itself.
 - Cloudflare free-tier limits that matter: 100 MB per request (uploads are capped at 32 MB; builds happen on-device), ~100 s idle timeout (WebSocket traffic and 5 s heartbeats keep sessions alive), and ToS discouragement of heavy media proxying.
 - `phleetd` reloads `cloudflare.json` every 15 s, so setup takes effect without a restart.
 - **Raw TCP needs a client helper.** A proxied hostname terminates HTTP. Cloudflare Tunnel can stream arbitrary TCP

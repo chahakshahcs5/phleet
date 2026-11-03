@@ -174,6 +174,7 @@ export interface Project {
   startCmd: string
   healthPath: string
   hostname: string
+  customHostname?: string
   selector: string
   replicas: number
   pinnedServer: string
