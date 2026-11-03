@@ -15,6 +15,7 @@ import type {
   ExecResult,
   FSList,
   FSRead,
+  Job,
   Me,
   Meta,
   NotifyConfig,
@@ -141,7 +142,9 @@ export const api = {
     port?: number
     identityFile?: string
     serverUrl?: string
+    async?: boolean
   }) => request<ProvisionResult>('/api/servers/provision', { method: 'POST', body: JSON.stringify(body) }),
+  job: (id: string) => request<{ job: Job }>(`/api/jobs/${id}`),
 
   projects: () => request<{ projects: ProjectView[] }>('/api/projects'),
   project: (id: string) => request<{ project: ProjectView }>(`/api/projects/${id}`),

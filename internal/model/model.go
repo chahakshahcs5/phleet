@@ -186,6 +186,19 @@ type Backup struct {
 	FinishedAt int64  `json:"finishedAt"`
 }
 
+// Job is a long-running control-plane operation (currently onboarding). The
+// UI polls it instead of holding an HTTP request open across a package install.
+type Job struct {
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	Target    string `json:"target"`
+	Status    string `json:"status"`
+	Output    string `json:"output"`
+	Error     string `json:"error,omitempty"`
+	CreatedAt int64  `json:"createdAt"`
+	UpdatedAt int64  `json:"updatedAt"`
+}
+
 type Alert struct {
 	ID         int64  `json:"id"`
 	Key        string `json:"key"`

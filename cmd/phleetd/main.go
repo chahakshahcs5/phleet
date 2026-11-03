@@ -156,6 +156,9 @@ func janitor(ctx context.Context, st *store.Store, log *slog.Logger) {
 			if err := st.PruneEvents(time.Now().Add(-90 * 24 * time.Hour).Unix()); err != nil {
 				log.Warn("prune events", "err", err)
 			}
+			if err := st.PruneJobs(time.Now().Add(-7 * 24 * time.Hour).Unix()); err != nil {
+				log.Warn("prune jobs", "err", err)
+			}
 		}
 	}
 }

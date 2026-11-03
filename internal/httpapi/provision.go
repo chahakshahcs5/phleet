@@ -39,6 +39,7 @@ func (s *Server) handleProvisionServer(w http.ResponseWriter, r *http.Request) {
 		Port         int    `json:"port"`
 		IdentityFile string `json:"identityFile"`
 		ServerURL    string `json:"serverUrl"`
+		Async        bool   `json:"async"`
 	}
 	if err := readJSON(r, &body, 64<<10); err != nil {
 		apiErr(w, 400, err)
@@ -106,23 +107,22 @@ func (s *Server) handleProvisionServer(w http.ResponseWriter, r *http.Request) {
 	}
 	args = append(args, target, "bash -s -- "+remoteBootstrapArgs(base, s.cfg.AgentToken, name))
 
-	// Do not tie a multi-minute package install to the browser request. A
-	// Cloudflare edge timeout or a closed tab would otherwise kill the SSH
-	// process halfway through the bootstrap. The output is still returned when
-	// the install finishes; a later phase should turn this into a job.
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, sshBin, args...)
-	cmd.Stdin = bytes.NewReader(script)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	runErr := cmd.Run()
-
-	output := ansiPattern.ReplaceAllString(out.String(), "")
-	if len(output) > 128<<10 {
-		output = output[:128<<10] + "\n[truncated]"
+	if body.Async {
+		jobID := s.startJob("server.provision", target, 10*time.Minute, func(ctx context.Context, logf func(string)) error {
+			output, err := runProvision(ctx, sshBin, args, script)
+			if output != "" {
+				logf(output)
+			}
+			return err
+		})
+		_ = s.st.AddEvent("ui", "server.provision_start", target, name)
+		writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "jobId": jobID})
+		return
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	output, runErr := runProvision(ctx, sshBin, args, script)
 	if runErr != nil {
 		_ = s.st.AddEvent("ui", "server.provision_failed", target, runErr.Error())
 		writeJSON(w, 502, map[string]any{"ok": false, "error": runErr.Error(), "output": output})
@@ -130,6 +130,20 @@ func (s *Server) handleProvisionServer(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.st.AddEvent("ui", "server.provision", target, name)
 	writeJSON(w, 200, map[string]any{"ok": true, "output": output})
+}
+
+func runProvision(ctx context.Context, sshBin string, args []string, script []byte) (string, error) {
+	cmd := exec.CommandContext(ctx, sshBin, args...)
+	cmd.Stdin = bytes.NewReader(script)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	runErr := cmd.Run()
+	output := ansiPattern.ReplaceAllString(out.String(), "")
+	if len(output) > 128<<10 {
+		output = output[:128<<10] + "\n[truncated]"
+	}
+	return output, runErr
 }
 
 func (s *Server) bootstrapPath() string {

@@ -411,4 +411,16 @@ export interface ProvisionResult {
   ok: boolean
   output?: string
   error?: string
+  jobId?: string
+}
+
+export interface Job {
+  id: string
+  kind: string
+  target: string
+  status: 'running' | 'succeeded' | 'failed'
+  output: string
+  error?: string
+  createdAt: number
+  updatedAt: number
 }

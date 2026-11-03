@@ -226,6 +226,18 @@ CREATE TABLE IF NOT EXISTS addon_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_addon_logs ON addon_logs(addon_id, id);
 
+CREATE TABLE IF NOT EXISTS jobs (
+  id         TEXT PRIMARY KEY,
+  kind       TEXT NOT NULL,
+  target     TEXT NOT NULL DEFAULT '',
+  status     TEXT NOT NULL DEFAULT 'running',
+  output     TEXT NOT NULL DEFAULT '',
+  error      TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
+
 CREATE TABLE IF NOT EXISTS backups (
   id          TEXT PRIMARY KEY,
   addon_id    TEXT NOT NULL,

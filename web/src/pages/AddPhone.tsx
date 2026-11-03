@@ -17,6 +17,13 @@ function shq(v: string): string {
 export default function AddPhone() {
   const qc = useQueryClient()
   const setup = useQuery({ queryKey: ['setup'], queryFn: api.setupInfo, staleTime: 0 })
+  const [jobId, setJobId] = useState('')
+  const job = useQuery({
+    queryKey: ['job', jobId],
+    queryFn: () => api.job(jobId),
+    enabled: !!jobId,
+    refetchInterval: (q) => (q.state.data?.job.status === 'running' ? 1000 : false),
+  })
   const [tab, setTab] = useState<'ssh' | 'manual'>('ssh')
   const [name, setName] = useState('')
   const [target, setTarget] = useState('')
@@ -29,6 +36,15 @@ export default function AddPhone() {
   useEffect(() => {
     if (!serverUrl && setup.data?.serverUrl) setServerUrl(setup.data.serverUrl)
   }, [setup.data, serverUrl])
+
+  useEffect(() => {
+    const j = job.data?.job
+    if (!j || j.status === 'running') return
+    setResult({ ok: j.status === 'succeeded', output: j.output || j.error || '' })
+    setJobId('')
+    qc.invalidateQueries({ queryKey: ['servers'] })
+    qc.invalidateQueries({ queryKey: ['events'] })
+  }, [job.data, qc])
 
   const manualName = name.trim() || 'phone'
   const command =
@@ -44,8 +60,13 @@ export default function AddPhone() {
         port: Number(port) || 0,
         identityFile: identity.trim(),
         serverUrl,
+        async: true,
       }),
     onSuccess: (res) => {
+      if (res.jobId) {
+        setJobId(res.jobId)
+        return
+      }
       setResult({ ok: true, output: res.output || '' })
       qc.invalidateQueries({ queryKey: ['servers'] })
       qc.invalidateQueries({ queryKey: ['events'] })
@@ -169,6 +190,12 @@ export default function AddPhone() {
             <span className="font-mono">user@host</span> plus an explicit identity file readable by SYSTEM.
           </p>
 
+          {jobId ? (
+            <div className="mt-3 rounded-lg border border-sky-900/40 bg-sky-500/5 px-3 py-2 text-[11px] text-sky-300">
+              Installing in the background… {job.data?.job.status === 'running' ? 'running' : 'finishing'}
+            </div>
+          ) : null}
+          {job.isError ? <div className="mt-2 text-[11px] text-red-400">{String(job.error)}</div> : null}
           {result ? (
             <div
               className={cn(
@@ -191,14 +218,25 @@ export default function AddPhone() {
             <Button
               variant="primary"
               size="sm"
-              disabled={provision.isPending || !target.trim() || !serverUrl.trim() || setup.data?.sshAvailable === false}
+              disabled={
+                provision.isPending ||
+                !!jobId ||
+                !target.trim() ||
+                !serverUrl.trim() ||
+                setup.data?.sshAvailable === false
+              }
               onClick={() => {
                 setResult(null)
+                setJobId('')
                 provision.mutate()
               }}
             >
-              {provision.isPending ? <Spinner className="h-3 w-3 border-zinc-900/40 border-t-zinc-900" /> : <Server size={12} />}
-              {provision.isPending ? 'Installing…' : 'Install agent over SSH'}
+              {provision.isPending || jobId ? (
+                <Spinner className="h-3 w-3 border-zinc-900/40 border-t-zinc-900" />
+              ) : (
+                <Server size={12} />
+              )}
+              {provision.isPending || jobId ? 'Installing…' : 'Install agent over SSH'}
             </Button>
           </div>
         </Card>

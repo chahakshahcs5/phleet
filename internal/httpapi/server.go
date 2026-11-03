@@ -190,6 +190,7 @@ func (s *Server) routes() {
 	api.HandleFunc("POST /edge/tunnel/restart", s.handleTunnelAction("restart"))
 	api.HandleFunc("GET /events", s.handleEvents)
 	api.HandleFunc("GET /events/facets", s.handleEventFacets)
+	api.HandleFunc("GET /jobs/{id}", s.handleGetJob)
 	api.HandleFunc("GET /setup", s.handleSetupInfo)
 	api.HandleFunc("GET /servers", s.handleListServers)
 	api.HandleFunc("POST /servers/provision", s.handleProvisionServer)

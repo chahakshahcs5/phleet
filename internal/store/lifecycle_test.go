@@ -60,6 +60,32 @@ func TestBackupCreatesUsableSnapshot(t *testing.T) {
 	}
 }
 
+func TestJobLifecycle(t *testing.T) {
+	st := newTestStore(t)
+	if err := st.CreateJob(model.Job{ID: "j1", Kind: "server.provision", Target: "phone"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendJobOutput("j1", "line one\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinishJob("j1", "succeeded", ""); err != nil {
+		t.Fatal(err)
+	}
+	j, err := st.GetJob("j1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Status != "succeeded" || j.Output != "line one\n" {
+		t.Fatalf("job = %+v", j)
+	}
+	if err := st.PruneJobs(time.Now().Add(time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetJob("j1"); err == nil {
+		t.Fatal("job was not pruned")
+	}
+}
+
 func TestPruneEventsKeepsRecentRows(t *testing.T) {
 	st := newTestStore(t)
 	old := time.Now().Add(-100 * 24 * time.Hour).Unix()
