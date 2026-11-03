@@ -38,6 +38,8 @@ func main() {
 		os.Exit(printTokens(os.Args[2:]))
 	case "backup":
 		os.Exit(backupDB(os.Args[2:]))
+	case "totp":
+		os.Exit(totpCommand(os.Args[2:]))
 	case "version", "-v", "--version":
 		fmt.Println("phleet " + config.Version)
 	default:
@@ -56,6 +58,7 @@ func usage() {
   phleet servers [flags]       List registered phones.
   phleet token [-which admin|agent|both]
   phleet backup [-out FILE]    Write a consistent snapshot of phleet.db
+  phleet totp -disable         Break-glass: remove the admin TOTP secret
 
 Flags:
   -data DIR        data directory (default ` + config.DefaultDataDir() + `)
@@ -436,6 +439,32 @@ func backupDB(args []string) int {
 		return 1
 	}
 	fmt.Println(abs)
+	return 0
+}
+
+func totpCommand(args []string) int {
+	fs := flag.NewFlagSet("totp", flag.ExitOnError)
+	dataDir := fs.String("data", config.DefaultDataDir(), "data directory")
+	disable := fs.Bool("disable", false, "remove the admin TOTP secret (break-glass)")
+	_ = fs.Parse(args)
+	if !*disable {
+		fmt.Fprintln(os.Stderr, "only -disable is supported; enable 2FA from Settings → Security")
+		return 2
+	}
+	cfg, err := config.Load(*dataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	st, err := store.Open(cfg.DBPath())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	defer st.Close()
+	_ = st.DeleteSetting("admin_totp_secret")
+	_ = st.DeleteSetting("admin_totp_pending")
+	fmt.Println("admin TOTP disabled")
 	return 0
 }
 

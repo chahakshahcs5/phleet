@@ -9,10 +9,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"phleet/internal/config"
 	"phleet/internal/model"
+	"phleet/internal/secrets"
 	"phleet/internal/store"
+	"phleet/internal/totp"
 )
 
 func testServer(t *testing.T) *Server {
@@ -221,6 +224,39 @@ func TestViewerAPITokenIsReadOnly(t *testing.T) {
 	}
 	if code := call(http.MethodGet, "/api/projects", "admin-secret"); code != http.StatusOK {
 		t.Fatalf("admin API token read = %d", code)
+	}
+}
+
+func TestAdminTOTPIsRequired(t *testing.T) {
+	s := testServer(t)
+	secret, err := totp.GenerateSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, err := secrets.Encrypt(s.cfg.SessionKey, []byte(secret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.st.SetSetting(settingTOTPSecret, enc); err != nil {
+		t.Fatal(err)
+	}
+	login := func(code string) int {
+		body := `{"token":"` + s.cfg.AdminToken + `","code":"` + code + `"}`
+		req := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rr, req)
+		return rr.Code
+	}
+	if code := login("abcdef"); code != http.StatusUnauthorized {
+		t.Fatalf("wrong TOTP = %d", code)
+	}
+	code, err := totp.Code(secret, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := login(code); status != http.StatusOK {
+		t.Fatalf("correct TOTP = %d", status)
 	}
 }
 

@@ -195,6 +195,10 @@ func (s *Server) routes() {
 	api.HandleFunc("GET /events", s.handleEvents)
 	api.HandleFunc("GET /events/facets", s.handleEventFacets)
 	api.HandleFunc("GET /jobs/{id}", s.handleGetJob)
+	api.HandleFunc("GET /totp", s.handleGetTOTP)
+	api.HandleFunc("POST /totp/setup", s.handleSetupTOTP)
+	api.HandleFunc("POST /totp/enable", s.handleEnableTOTP)
+	api.HandleFunc("POST /totp/disable", s.handleDisableTOTP)
 	api.HandleFunc("GET /api-tokens", s.handleListAPITokens)
 	api.HandleFunc("POST /api-tokens", s.handleCreateAPIToken)
 	api.HandleFunc("DELETE /api-tokens/{id}", s.handleDeleteAPIToken)
@@ -322,8 +326,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	publicURL, _ := s.Edge()
 	writeJSON(w, 200, map[string]any{
-		"version":   config.Version,
-		"publicUrl": publicURL,
+		"version":      config.Version,
+		"publicUrl":    publicURL,
+		"totpRequired": s.totpEnabled(),
 	})
 }
 
@@ -553,6 +558,7 @@ func (s *Server) requirePanelOrAgent(next http.Handler) http.Handler {
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Token string `json:"token"`
+		Code  string `json:"code"`
 	}
 	if err := readJSON(r, &body, 4096); err != nil {
 		writeJSON(w, 400, map[string]any{"error": "invalid body"})
@@ -562,6 +568,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(250 * time.Millisecond)
 		writeJSON(w, 401, map[string]any{"error": "wrong token"})
 		return
+	}
+	if s.totpEnabled() {
+		ok, err := s.validateTOTP(body.Code)
+		if err != nil {
+			writeJSON(w, 500, map[string]any{"error": "2FA configuration is unreadable"})
+			return
+		}
+		if !ok {
+			time.Sleep(250 * time.Millisecond)
+			writeJSON(w, 401, map[string]any{"error": "invalid 2FA code"})
+			return
+		}
 	}
 	exp := time.Now().Add(30 * 24 * time.Hour).Unix()
 	c := &http.Cookie{

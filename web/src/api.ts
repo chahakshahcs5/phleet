@@ -66,8 +66,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 export const api = {
   meta: () => request<Meta>('/api/meta'),
   me: () => request<Me>('/api/me'),
-  login: (token: string) =>
-    request<{ ok: boolean }>('/api/login', { method: 'POST', body: JSON.stringify({ token }) }),
+  login: (token: string, code = '') =>
+    request<{ ok: boolean }>('/api/login', { method: 'POST', body: JSON.stringify({ token, code }) }),
   logout: () => request<{ ok: boolean }>('/api/logout', { method: 'POST' }),
 
   servers: () =>
@@ -134,6 +134,11 @@ export const api = {
   eventFacets: () => request<{ actions: string[]; actors: string[] }>('/api/events/facets'),
 
   setupInfo: () => request<SetupInfo>('/api/setup'),
+  totp: () => request<{ enabled: boolean }>('/api/totp'),
+  setupTOTP: () => request<{ secret: string; url: string }>('/api/totp/setup', { method: 'POST' }),
+  enableTOTP: (code: string) =>
+    request<{ enabled: boolean }>('/api/totp/enable', { method: 'POST', body: JSON.stringify({ code }) }),
+  disableTOTP: () => request<{ enabled: boolean }>('/api/totp/disable', { method: 'POST' }),
   tunnelStatus: () => request<TunnelStatus>('/api/edge/tunnel'),
   tunnelAction: (action: 'start' | 'stop' | 'restart') =>
     request<TunnelStatus>(`/api/edge/tunnel/${action}`, { method: 'POST' }),

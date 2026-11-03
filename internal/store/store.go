@@ -801,6 +801,11 @@ func (s *Store) SetSetting(key, value string) error {
 	return err
 }
 
+func (s *Store) DeleteSetting(key string) error {
+	_, err := s.db.Exec(`DELETE FROM settings WHERE key=?`, key)
+	return err
+}
+
 func (s *Store) Stats() (servers int, samples int, err error) {
 	if err = s.db.QueryRow(`SELECT COUNT(*) FROM servers`).Scan(&servers); err != nil {
 		return

@@ -7,11 +7,13 @@ import { Button, Spinner } from '../components/ui'
 
 export default function Login() {
   const [token, setToken] = useState('')
+  const [code, setCode] = useState('')
   const qc = useQueryClient()
   const meta = useQuery({ queryKey: ['meta'], queryFn: api.meta, retry: false })
+  const totpRequired = !!meta.data?.totpRequired
 
   const login = useMutation({
-    mutationFn: () => api.login(token.trim()),
+    mutationFn: () => api.login(token.trim(), code.trim()),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['me'] })
     },
@@ -58,6 +60,23 @@ export default function Login() {
               className="h-10 w-full rounded-lg border border-zinc-800 bg-zinc-950/80 pr-3 pl-9 font-mono text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-emerald-400/50"
             />
           </div>
+          {totpRequired ? (
+            <>
+              <label htmlFor="code" className="mt-3 block text-[10px] font-medium tracking-widest text-zinc-500 uppercase">
+                Two-factor code
+              </label>
+              <input
+                id="code"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                maxLength={6}
+                value={code}
+                onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
+                placeholder="123456"
+                className="mt-2 h-10 w-full rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 text-center font-mono text-sm tracking-[0.4em] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-emerald-400/50"
+              />
+            </>
+          ) : null}
           {login.isError ? (
             <p className="mt-2 text-[11px] text-red-400">{String((login.error as Error).message)}</p>
           ) : null}
@@ -65,7 +84,7 @@ export default function Login() {
             type="submit"
             variant="primary"
             className="mt-4 w-full"
-            disabled={login.isPending || token.trim() === ''}
+            disabled={login.isPending || token.trim() === '' || (totpRequired && code.length !== 6)}
           >
             {login.isPending ? <Spinner className="h-4 w-4 border-zinc-900/40 border-t-zinc-900" /> : null}
             Enter <ArrowRight size={14} />

@@ -15,6 +15,8 @@ export default function Settings() {
   const [tokenName, setTokenName] = useState('')
   const [tokenRole, setTokenRole] = useState<'admin' | 'viewer'>('viewer')
   const [createdToken, setCreatedToken] = useState('')
+  const [totpSetup, setTotpSetup] = useState<{ secret: string; url: string } | null>(null)
+  const [totpCode, setTotpCode] = useState('')
   const base = me.data?.publicUrl || 'https://fleet.example.com'
   const dataDir = me.data?.dataDir || '%ProgramData%\\phleet'
 
@@ -32,6 +34,30 @@ export default function Settings() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['api-tokens'] }),
   })
   const tokenList: APIToken[] = tokens.data?.tokens ?? []
+
+  const totp = useQuery({ queryKey: ['totp'], queryFn: api.totp })
+  const setupTOTP = useMutation({
+    mutationFn: () => api.setupTOTP(),
+    onSuccess: (res) => setTotpSetup(res),
+  })
+  const enableTOTP = useMutation({
+    mutationFn: () => api.enableTOTP(totpCode.trim()),
+    onSuccess: () => {
+      setTotpSetup(null)
+      setTotpCode('')
+      qc.invalidateQueries({ queryKey: ['totp'] })
+      qc.invalidateQueries({ queryKey: ['meta'] })
+    },
+  })
+  const disableTOTP = useMutation({
+    mutationFn: () => api.disableTOTP(),
+    onSuccess: () => {
+      setTotpSetup(null)
+      setTotpCode('')
+      qc.invalidateQueries({ queryKey: ['totp'] })
+      qc.invalidateQueries({ queryKey: ['meta'] })
+    },
+  })
 
   return (
     <div className="mx-auto max-w-4xl space-y-4 px-4 py-6 md:px-8 md:py-8">
@@ -247,6 +273,68 @@ export default function Settings() {
             The shared agent token is only an enrollment token; phones receive a per-device token on first connect.
             Scoped API tokens above can be revoked at any time.
           </p>
+          <div className="border-t border-zinc-800/60 pt-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="flex items-center gap-2 text-[11px] text-zinc-300">
+                  <KeyRound size={12} className="text-zinc-500" /> Admin two-factor authentication
+                  <Badge tone={totp.data?.enabled ? 'good' : 'warn'}>
+                    {totp.data?.enabled ? 'enabled' : 'off'}
+                  </Badge>
+                </div>
+                <p className="mt-1 text-[10px] text-zinc-600">
+                  TOTP is required after the admin token. If you lose the device, run{' '}
+                  <span className="font-mono">phleet totp -disable</span> on the control-plane host.
+                </p>
+              </div>
+              {totp.data?.enabled ? (
+                <Button size="sm" variant="outline" disabled={disableTOTP.isPending} onClick={() => disableTOTP.mutate()}>
+                  Disable 2FA
+                </Button>
+              ) : (
+                <Button size="sm" variant="outline" disabled={setupTOTP.isPending} onClick={() => setupTOTP.mutate()}>
+                  Set up 2FA
+                </Button>
+              )}
+            </div>
+            {totpSetup ? (
+              <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950/70 p-3">
+                <div className="text-[10px] text-zinc-500">Secret</div>
+                <code className="mt-1 block break-all font-mono text-[11px] text-emerald-300">{totpSetup.secret}</code>
+                <div className="mt-2 break-all text-[10px] text-zinc-600">{totpSetup.url}</div>
+                <div className="mt-3 flex items-end gap-2">
+                  <label className="flex-1">
+                    <span className="text-[10px] text-zinc-500">Code from authenticator</span>
+                    <input
+                      inputMode="numeric"
+                      maxLength={6}
+                      value={totpCode}
+                      onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, ''))}
+                      placeholder="123456"
+                      className="mt-1 h-9 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 text-center font-mono text-sm tracking-[0.35em] text-zinc-200 outline-none focus:border-emerald-400/40"
+                    />
+                  </label>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={totpCode.length !== 6 || enableTOTP.isPending}
+                    onClick={() => enableTOTP.mutate()}
+                  >
+                    Enable
+                  </Button>
+                </div>
+                {enableTOTP.isError ? (
+                  <div className="mt-2 text-[11px] text-red-400">{String(enableTOTP.error)}</div>
+                ) : null}
+              </div>
+            ) : null}
+            {setupTOTP.isError ? (
+              <div className="mt-2 text-[11px] text-red-400">{String(setupTOTP.error)}</div>
+            ) : null}
+            {disableTOTP.isError ? (
+              <div className="mt-2 text-[11px] text-red-400">{String(disableTOTP.error)}</div>
+            ) : null}
+          </div>
         </div>
       </Card>
 

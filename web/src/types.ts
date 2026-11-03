@@ -129,6 +129,7 @@ export interface Me {
 export interface Meta {
   version: string
   publicUrl: string
+  totpRequired?: boolean
 }
 
 export interface Placement {
