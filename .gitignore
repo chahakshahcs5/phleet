@@ -1,0 +1,25 @@
+# build output
+/dist/
+/.tmp/
+
+# go
+*.db
+*.db-wal
+*.db-shm
+*.exe
+*.log
+
+# web
+web/node_modules/
+web/.vite/
+
+# local configuration
+.env
+.env.local
+.env.*.local
+
+# editors / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
