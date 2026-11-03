@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -668,6 +669,31 @@ func (a *Agent) handleAddonRestore(req agentproto.AddonRestoreRequest, emit func
 		fail("addon is not provisioned on this phone")
 		return
 	}
+	params := engines.Params{
+		DataDir: dir, File: req.File, Port: req.Port,
+		User: req.User, Password: req.Password, Database: req.Database,
+	}
+	// Keep a local safety dump before overwriting live data. It lives under
+	// the addon's backups directory, so the file browser can retrieve it even
+	// though it is not part of the control-plane backup list.
+	if eng.Backup != nil {
+		backupDir := filepath.Join(dir, "backups")
+		if err := os.MkdirAll(backupDir, 0o700); err == nil {
+			safety := filepath.Join(backupDir, "pre-restore-"+time.Now().Format("20060102-150405")+backupExt(eng))
+			logf("pre-restore snapshot: %s", safety)
+			scctx, scancel := context.WithTimeout(ctx, 15*time.Minute)
+			err := a.runCommand(scctx, dir, a.shPath, []string{"-c", eng.Backup(params, safety)}, os.Environ(), func(line string) {
+				logf("snapshot: %s", line)
+			})
+			scancel()
+			if err != nil {
+				logf("warning: pre-restore snapshot failed: %s", err)
+				_ = os.Remove(safety)
+			} else {
+				prunePreRestore(backupDir, 2)
+			}
+		}
+	}
 
 	// Postgres restores through a live connection; Redis, SQLite and rclone
 	// replace files and must be stopped first.
@@ -683,10 +709,6 @@ func (a *Agent) handleAddonRestore(req agentproto.AddonRestoreRequest, emit func
 			fail("engine did not become healthy for the restore: " + err.Error())
 			return
 		}
-	}
-	params := engines.Params{
-		DataDir: dir, File: req.File, Port: req.Port,
-		User: req.User, Password: req.Password, Database: req.Database,
 	}
 	logf("restoring %s", eng.Name)
 	if err := a.runCommand(ctx, dir, a.shPath, []string{"-c", eng.Restore(params, dest)}, os.Environ(), func(line string) {
@@ -880,6 +902,24 @@ func (a *Agent) uploadFile(ctx context.Context, apiPath, src string) error {
 		}
 	}
 	return nil
+}
+
+func prunePreRestore(dir string, keep int) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasPrefix(e.Name(), "pre-restore-") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	for len(names) > keep {
+		_ = os.Remove(filepath.Join(dir, names[0]))
+		names = names[1:]
+	}
 }
 
 func fileSHA256(path string) (string, error) {

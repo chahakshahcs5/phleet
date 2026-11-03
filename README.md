@@ -346,7 +346,8 @@ The detail page gives you:
 
 - **Console** — one-shot SQL or Redis commands, piped to `psql`/`redis-cli`/`sqlite3` on the phone.
 - **Backups** — dump on the phone, upload in 32 MB chunks (so a large dump survives Cloudflare's 100 MB request cap),
-  keep the last 10, download or restore. An automatic daily backup runs when the phone is charging or above 40 %.
+  keep the last 10, download or restore. SHA-256 is stored with each backup and verified before a restore. A pre-restore snapshot is written under the addon's
+  data `backups/` directory (the last two are kept) so the previous state is still retrievable from the file browser. An automatic daily backup runs when the phone is charging or above 40 %.
 - **Replication** — add a standby on another phone, watch replay lag, promote manually after the old primary is
   fenced. PostgreSQL uses streaming replication; Redis uses `REPLICAOF`. SQLite and S3 have no standby. **Automatic
   failover** is opt-in per addon: the control plane is the witness, the primary renews a lease, and the agent
