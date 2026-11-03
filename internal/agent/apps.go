@@ -457,6 +457,7 @@ func (a *Agent) stopProcess(p *appProcess) {
 	}
 	p.stopping = true
 	p.mu.Unlock()
+	a.log.Info("stopping app", "slug", spec.Slug, "pid", pid, "cmd", cmd != nil)
 
 	if cmd != nil && cmd.Process != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, sig)

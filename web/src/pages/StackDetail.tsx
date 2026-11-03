@@ -15,7 +15,7 @@ import {
 } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { api } from '../api'
+import { ApiError, api } from '../api'
 import { ConfirmDialog } from '../components/Dialog'
 import { Badge, Button, Card, DeployBadge, EmptyState, Spinner } from '../components/ui'
 import { ago } from '../lib/format'
@@ -91,6 +91,10 @@ export default function StackDetail() {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [addonWarning, setAddonWarning] = useState<{
+    addons: { id: string; name: string }[]
+    shared: { id: string; name: string }[]
+  } | null>(null)
 
   const query = useQuery({
     queryKey: ['project', id],
@@ -114,10 +118,21 @@ export default function StackDetail() {
     },
   })
   const remove = useMutation({
-    mutationFn: () => api.deleteProject(id),
+    mutationFn: (deleteAddons: boolean) => api.deleteProject(id, { deleteAddons }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['projects'] })
       navigate('/projects')
+    },
+    onError: (err) => {
+      if (!(err instanceof ApiError) || err.status !== 409) return
+      const data = err.data as {
+        code?: string
+        addons?: { id: string; name: string }[]
+        shared?: { id: string; name: string }[]
+      }
+      if (data?.code !== 'addons_attached') return
+      setDeleteOpen(false)
+      setAddonWarning({ addons: data.addons ?? [], shared: data.shared ?? [] })
     },
   })
 
@@ -137,7 +152,7 @@ export default function StackDetail() {
   const services = project.services ?? []
   const busy = deploy.isPending || action.isPending || remove.isPending
   const primary = services[0]
-  const mutError = deploy.error || action.error || remove.error
+  const mutError = deploy.error || action.error || (addonWarning ? undefined : remove.error)
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-6 md:px-8 md:py-8">
@@ -267,13 +282,43 @@ export default function StackDetail() {
         open={deleteOpen}
         onClose={() => setDeleteOpen(false)}
         title={`Delete ${project.name}?`}
-        description="This stops every service, removes the stack and forgets all deployment history. This cannot be undone."
+        description="This stops every service, removes the stack and forgets all deployment history. Attached databases are handled next. This cannot be undone."
         confirmLabel="Delete stack"
         danger
         busy={remove.isPending}
+        onConfirm={() => remove.mutate(false)}
+      />
+
+      <ConfirmDialog
+        open={!!addonWarning}
+        onClose={() => setAddonWarning(null)}
+        title={`Delete ${project.name} and its databases?`}
+        description={
+          <div className="space-y-2">
+            <p>This stack owns these data services:</p>
+            <ul className="list-disc pl-4 font-mono text-[11px] text-zinc-300">
+              {addonWarning?.addons.map((a) => (
+                <li key={a.id}>{a.name}</li>
+              ))}
+            </ul>
+            <p>
+              Deleting the stack also deletes them and <strong>all of their data</strong>. Take a
+              backup first if you need it.
+            </p>
+            {addonWarning && addonWarning.shared.length > 0 ? (
+              <p>
+                These are also used by another project and will be kept:{' '}
+                <span className="font-mono">{addonWarning.shared.map((a) => a.name).join(', ')}</span>.
+              </p>
+            ) : null}
+          </div>
+        }
+        confirmLabel="Delete stack and databases"
+        danger
+        busy={remove.isPending}
         onConfirm={() => {
-          remove.mutate()
-          setDeleteOpen(false)
+          remove.mutate(true)
+          setAddonWarning(null)
         }}
       />
     </div>

@@ -172,7 +172,12 @@ export const api = {
     pinnedServer: string
     env: Record<string, string>
   }>) => request<{ project: ProjectView }>(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
-  deleteProject: (id: string) => request<{ ok: boolean }>(`/api/projects/${id}`, { method: 'DELETE' }),
+  deleteProject: (id: string, opts: { deleteAddons?: boolean } = {}) => {
+    const sp = new URLSearchParams()
+    if (opts.deleteAddons) sp.set('addons', 'delete')
+    const q = sp.toString()
+    return request<{ ok: boolean }>(`/api/projects/${id}${q ? `?${q}` : ''}`, { method: 'DELETE' })
+  },
   deployProject: (id: string) =>
     request<DeployResult>(`/api/projects/${id}/deploy`, { method: 'POST' }),
   projectAction: (id: string, action: 'start' | 'stop' | 'restart' | 'rollback') =>

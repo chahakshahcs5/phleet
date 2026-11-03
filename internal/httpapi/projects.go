@@ -820,13 +820,92 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"project": s.buildProjectView(p, true)})
 }
 
+// stackAddonSets splits the addons attached to a stack (and its children) into
+// those used only by this stack and those shared with another project. A stack
+// stop/delete only owns the first group; a shared database stays running.
+func (s *Server) stackAddonSets(p model.Project) (owned, shared []model.Addon) {
+	if p.Kind != "stack" {
+		owned, _ = s.st.OwnedAddons(p.ID)
+		return owned, nil
+	}
+	ids := map[string]bool{p.ID: true}
+	if children, err := s.st.ListChildProjects(p.ID); err == nil {
+		for _, c := range children {
+			ids[c.ID] = true
+		}
+	}
+	seen := map[string]bool{}
+	add := func(a model.Addon) {
+		if seen[a.ID] {
+			return
+		}
+		seen[a.ID] = true
+		bindings, _ := s.st.ListAddonBindings(a.ID)
+		isShared := false
+		for _, b := range bindings {
+			if !ids[b.ProjectID] {
+				isShared = true
+				break
+			}
+		}
+		if isShared {
+			shared = append(shared, a)
+		} else {
+			owned = append(owned, a)
+		}
+	}
+	for id := range ids {
+		if addons, err := s.st.ListProjectAddons(id); err == nil {
+			for _, a := range addons {
+				add(a)
+			}
+		}
+	}
+	if ownedByProject, err := s.st.OwnedAddons(p.ID); err == nil {
+		for _, a := range ownedByProject {
+			add(a)
+		}
+	}
+	return owned, shared
+}
+
+func (s *Server) stackOwnAddons(p model.Project) []model.Addon {
+	owned, _ := s.stackAddonSets(p)
+	return owned
+}
+
+func addonRefs(addons []model.Addon) []map[string]string {
+	out := make([]map[string]string, 0, len(addons))
+	for _, a := range addons {
+		out = append(out, map[string]string{"id": a.ID, "name": a.Name})
+	}
+	return out
+}
+
 func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	p, err := s.st.GetProject(r.PathValue("id"))
 	if err != nil {
 		apiErr(w, 404, err)
 		return
 	}
-	if owned, err := s.st.OwnedAddons(p.ID); err == nil && len(owned) > 0 {
+	var deleteAddons, sharedAddons []model.Addon
+	if p.Kind == "stack" {
+		deleteAddons, sharedAddons = s.stackAddonSets(p)
+		if len(deleteAddons) > 0 && !truthy(r.URL.Query().Get("addons")) {
+			names := make([]string, 0, len(deleteAddons))
+			for _, a := range deleteAddons {
+				names = append(names, a.Name)
+			}
+			writeJSON(w, 409, map[string]any{
+				"error": fmt.Sprintf("this stack owns %s; deleting it also deletes %s and all of the data. Confirm with addons=delete.",
+					strings.Join(names, ", "), "them"),
+				"code":   "addons_attached",
+				"addons": addonRefs(deleteAddons),
+				"shared": addonRefs(sharedAddons),
+			})
+			return
+		}
+	} else if owned, err := s.st.OwnedAddons(p.ID); err == nil && len(owned) > 0 {
 		names := make([]string, 0, len(owned))
 		for _, a := range owned {
 			names = append(names, a.Name)
@@ -850,6 +929,13 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 			_, _ = s.hub.Call(ctx, pl.ServerID, agentproto.TypeAppControl,
 				agentproto.AppControlRequest{Slug: target.Slug, Action: "delete"})
 			cancel()
+		}
+	}
+	// The apps are stopped; now remove the databases that belong to the stack.
+	for _, a := range deleteAddons {
+		if err := s.deleteAddon(r.Context(), a, true); err != nil {
+			apiErr(w, 500, fmt.Errorf("delete addon %s: %w", a.Name, err))
+			return
 		}
 	}
 	if err := s.st.DeleteProject(p.ID); err != nil {
@@ -1028,12 +1114,33 @@ func (s *Server) handleProjectAction(action string) http.HandlerFunc {
 				apiErr(w, 409, errors.New("this stack has no services"))
 				return
 			}
+			addons := s.stackOwnAddons(p)
 			results := []map[string]any{}
+			// Dependencies start first and stop last, so a start has its
+			// database ready and a stop shuts the apps down cleanly.
+			if action == "start" {
+				for _, a := range addons {
+					if _, err := s.runAddonAction(r.Context(), a, "start"); err != nil {
+						results = append(results, map[string]any{"addon": a.Name, "ok": false, "error": err.Error()})
+					} else {
+						results = append(results, map[string]any{"addon": a.Name, "ok": true})
+					}
+				}
+			}
 			okCount := 0
 			for _, child := range children {
 				childResults, childOK := s.runProjectAction(r.Context(), child, action)
 				results = append(results, childResults...)
 				okCount += childOK
+			}
+			if action == "stop" {
+				for _, a := range addons {
+					if _, err := s.runAddonAction(r.Context(), a, "stop"); err != nil {
+						results = append(results, map[string]any{"addon": a.Name, "ok": false, "error": err.Error()})
+					} else {
+						results = append(results, map[string]any{"addon": a.Name, "ok": true})
+					}
+				}
 			}
 			if okCount == 0 {
 				apiErr(w, 409, errors.New("no online service accepted the action"))

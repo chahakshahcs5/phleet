@@ -871,54 +871,63 @@ func (s *Server) handleAddonAction(action string) http.HandlerFunc {
 			apiErr(w, 404, err)
 			return
 		}
-		placements, err := s.st.ListAddonPlacements(a.ID)
-		if err != nil || len(placements) == 0 {
-			apiErr(w, 409, errors.New("this addon has no placement"))
+		if _, err := s.runAddonAction(r.Context(), a, action); err != nil {
+			apiErr(w, 409, err)
 			return
-		}
-		okCount := 0
-		var lastErr error
-		for _, pl := range placements {
-			if !s.hub.Online(pl.ServerID) {
-				continue
-			}
-			ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
-			_, err := s.hub.Call(ctx, pl.ServerID, agentproto.TypeAddonControl,
-				agentproto.AddonControlRequest{AddonID: a.ID, Slug: a.Slug, Action: action})
-			cancel()
-			if err != nil {
-				lastErr = err
-				continue
-			}
-			okCount++
-		}
-		if okCount == 0 {
-			if lastErr == nil {
-				lastErr = errors.New("no online placement accepted the action")
-			}
-			apiErr(w, 409, lastErr)
-			return
-		}
-		switch action {
-		case "stop":
-			_ = s.st.SetAddonDesired(a.ID, "stopped")
-			_ = s.st.SetAddonStatus(a.ID, "stopped", "")
-			_ = s.st.UpdateAddonPlacementStatus(a.ID, a.PinnedServer, "stopped", 0, 0, "")
-			if s.bridges != nil {
-				s.bridges.stop(a.ID)
-			}
-		case "start", "restart":
-			_ = s.st.SetAddonDesired(a.ID, "running")
-			_ = s.st.SetAddonStatus(a.ID, "running", "")
-			_ = s.st.UpdateAddonPlacementStatus(a.ID, a.PinnedServer, "running", 0, 0, "")
-			if s.bridges != nil {
-				_ = s.bridges.start(a)
-			}
 		}
 		_ = s.st.AddEvent("ui", "addon."+action, a.ID, a.Name)
 		a, _ = s.st.GetAddon(a.ID)
 		writeJSON(w, 200, map[string]any{"ok": true, "addon": s.buildAddonView(a, true)})
 	}
+}
+
+// runAddonAction starts, stops or restarts one addon on every online placement.
+// It is shared by the addon page and by stack start/stop so a stack can bring
+// its databases along with it.
+func (s *Server) runAddonAction(ctx context.Context, a model.Addon, action string) (int, error) {
+	placements, err := s.st.ListAddonPlacements(a.ID)
+	if err != nil || len(placements) == 0 {
+		return 0, errors.New("this addon has no placement")
+	}
+	okCount := 0
+	var lastErr error
+	for _, pl := range placements {
+		if !s.hub.Online(pl.ServerID) {
+			continue
+		}
+		callCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+		_, err := s.hub.Call(callCtx, pl.ServerID, agentproto.TypeAddonControl,
+			agentproto.AddonControlRequest{AddonID: a.ID, Slug: a.Slug, Action: action})
+		cancel()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		okCount++
+	}
+	if okCount == 0 {
+		if lastErr == nil {
+			lastErr = errors.New("no online placement accepted the action")
+		}
+		return 0, lastErr
+	}
+	switch action {
+	case "stop":
+		_ = s.st.SetAddonDesired(a.ID, "stopped")
+		_ = s.st.SetAddonStatus(a.ID, "stopped", "")
+		_ = s.st.UpdateAddonPlacementStatus(a.ID, a.PinnedServer, "stopped", 0, 0, "")
+		if s.bridges != nil {
+			s.bridges.stop(a.ID)
+		}
+	case "start", "restart":
+		_ = s.st.SetAddonDesired(a.ID, "running")
+		_ = s.st.SetAddonStatus(a.ID, "running", "")
+		_ = s.st.UpdateAddonPlacementStatus(a.ID, a.PinnedServer, "running", 0, 0, "")
+		if s.bridges != nil {
+			_ = s.bridges.start(a)
+		}
+	}
+	return okCount, nil
 }
 
 func (s *Server) handleDeleteAddon(w http.ResponseWriter, r *http.Request) {
@@ -934,6 +943,17 @@ func (s *Server) handleDeleteAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	purge := truthy(r.URL.Query().Get("purge"))
+	if err := s.deleteAddon(r.Context(), a, purge); err != nil {
+		apiErr(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "purged": purge})
+}
+
+// deleteAddon removes one addon from every phone, drops its stored backups and
+// deletes the row. It does not check bindings; callers decide whether that is
+// allowed.
+func (s *Server) deleteAddon(ctx context.Context, a model.Addon, purge bool) error {
 	if s.bridges != nil {
 		s.bridges.stop(a.ID)
 	}
@@ -944,8 +964,8 @@ func (s *Server) handleDeleteAddon(w http.ResponseWriter, r *http.Request) {
 		if !s.hub.Online(pl.ServerID) {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		_, _ = s.hub.Call(ctx, pl.ServerID, agentproto.TypeAddonControl,
+		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		_, _ = s.hub.Call(callCtx, pl.ServerID, agentproto.TypeAddonControl,
 			agentproto.AddonControlRequest{AddonID: a.ID, Slug: a.Slug, Action: "delete", PurgeData: purge})
 		cancel()
 	}
@@ -958,12 +978,11 @@ func (s *Server) handleDeleteAddon(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := s.st.DeleteAddon(a.ID); err != nil {
-		apiErr(w, 500, err)
-		return
+		return err
 	}
 	_, _ = s.st.ResolveAlert("addon:" + a.ID)
 	_ = s.st.AddEvent("ui", "addon.delete", a.ID, a.Name)
-	writeJSON(w, 200, map[string]any{"ok": true, "purged": purge})
+	return nil
 }
 
 // ---- standby + promotion ----

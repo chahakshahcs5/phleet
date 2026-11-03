@@ -204,6 +204,11 @@ change. phleet still does not read `docker-compose.yml`, provide shared volumes 
 containers on a phone use Podroid + Compose. For a database inside a stack, create it from the project wizard — the
 stack pins every service to one phone, which is exactly what a loopback database needs.
 
+**Stack lifecycle includes its databases.** `Stop` stops the services and then the addons that belong to the stack;
+`Start` brings those addons up before the services. Deleting a stack shows a second warning listing the databases it
+owns, then deletes them and their data (a database also attached to another project is kept). Back up anything you
+need before confirming.
+
 The app receives `PORT`, `HOST=0.0.0.0`, `NODE_ENV=production`, `PHLEET_APP` and your variables. Its URL is
 `<slug>.<domain>` once Cloudflare is configured, or `<slug>.localhost` for local use (Chrome resolves any
 `*.localhost` to loopback).
