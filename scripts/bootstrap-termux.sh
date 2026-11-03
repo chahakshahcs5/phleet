@@ -153,6 +153,13 @@ chmod 600 "$HOME/.phleet/agent.env"
 # Unix user, so this is defence in depth rather than perfect isolation.
 printf '%s\n' "$TOKEN" > "$HOME/.phleet/agent.token"
 chmod 600 "$HOME/.phleet/agent.token"
+# Pin the signed-update key. Existing installs keep their old key so a
+# compromised control plane cannot silently change the update trust root.
+if [ ! -s "$HOME/.phleet/update.pub" ]; then
+  curl -fsSL -H "Authorization: Bearer $TOKEN" \
+    "$SERVER/download/update.pub" -o "$HOME/.phleet/update.pub" 2>/dev/null || true
+  [ -s "$HOME/.phleet/update.pub" ] && chmod 644 "$HOME/.phleet/update.pub"
+fi
 
 cat > "$HOME/.phleet/run-agent.sh" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/sh

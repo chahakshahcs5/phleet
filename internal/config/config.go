@@ -3,8 +3,11 @@
 package config
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,10 +15,11 @@ import (
 )
 
 const (
-	Version   = "0.10.1"
-	AdminFile = "admin_token"
-	AgentFile = "agent_token"
-	KeyFile   = "session.key"
+	Version       = "0.10.1"
+	AdminFile     = "admin_token"
+	AgentFile     = "agent_token"
+	KeyFile       = "session.key"
+	UpdateKeyFile = "update.key"
 )
 
 func DefaultDataDir() string {
@@ -43,6 +47,7 @@ type Config struct {
 	AgentToken     string
 	SessionKey     []byte
 	ServerSecret   string
+	UpdateKey      ed25519.PrivateKey
 }
 
 // Load ensures the data directory and secrets exist. Existing secrets are
@@ -67,12 +72,43 @@ func Load(dataDir string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	updateKey, err := loadOrCreateUpdateKey(filepath.Join(dataDir, UpdateKeyFile))
+	if err != nil {
+		return nil, err
+	}
 	return &Config{
 		DataDir:    dataDir,
 		AdminToken: admin,
 		AgentToken: agent,
 		SessionKey: []byte(key),
+		UpdateKey:  updateKey,
 	}, nil
+}
+
+func loadOrCreateUpdateKey(path string) (ed25519.PrivateKey, error) {
+	if b, err := os.ReadFile(path); err == nil {
+		raw, err := hex.DecodeString(strings.TrimSpace(string(b)))
+		if err != nil || len(raw) != ed25519.PrivateKeySize {
+			return nil, fmt.Errorf("invalid %s", path)
+		}
+		return ed25519.PrivateKey(raw), nil
+	}
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(path, []byte(hex.EncodeToString(priv)+"\n"), 0o600); err != nil {
+		return nil, err
+	}
+	return priv, nil
+}
+
+func (c *Config) UpdatePublicKey() string {
+	if len(c.UpdateKey) != ed25519.PrivateKeySize {
+		return ""
+	}
+	pub := c.UpdateKey.Public().(ed25519.PublicKey)
+	return base64.StdEncoding.EncodeToString(pub)
 }
 
 func readOrCreate(path string, bytes int) (string, error) {

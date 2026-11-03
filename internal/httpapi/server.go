@@ -302,6 +302,9 @@ func (s *Server) routes() {
 		s.requirePanelOrAgent(http.HandlerFunc(s.handleAddonBackupUpload)))
 	s.mux.Handle("GET /api/addons/{id}/backups/{backupId}/download",
 		s.requirePanelOrAgent(http.HandlerFunc(s.handleAddonBackupDownload)))
+	s.mux.Handle("GET /api/agent/update",
+		s.requirePanelOrAgent(http.HandlerFunc(s.handleAgentUpdateManifest)))
+	s.mux.HandleFunc("GET /download/update.pub", s.handleUpdatePublicKey)
 
 	s.mux.Handle("/api/", http.StripPrefix("/api", s.requirePanelAuth(api)))
 	s.mux.HandleFunc("/agent", s.handleAgent)

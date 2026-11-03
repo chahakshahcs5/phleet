@@ -1,6 +1,9 @@
 package httpapi
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -313,6 +316,37 @@ func TestAdminTOTPIsRequired(t *testing.T) {
 	}
 	if status := login(code); status != http.StatusOK {
 		t.Fatalf("correct TOTP = %d", status)
+	}
+}
+
+func TestAgentUpdateManifestIsSigned(t *testing.T) {
+	s := testServer(t)
+	if err := os.MkdirAll(s.cfg.BinDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.cfg.BinDir(), "phleet-agent-linux-arm64"), []byte("agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/agent/update?arch=arm64", nil)
+	req.Header.Set("Authorization", "Bearer "+s.cfg.AdminToken)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("manifest status = %d %s", rr.Code, rr.Body.String())
+	}
+	var m struct {
+		Version   string `json:"version"`
+		Arch      string `json:"arch"`
+		SHA256    string `json:"sha256"`
+		Signature string `json:"signature"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&m); err != nil {
+		t.Fatal(err)
+	}
+	pub, _ := base64.StdEncoding.DecodeString(s.cfg.UpdatePublicKey())
+	sig, _ := base64.StdEncoding.DecodeString(m.Signature)
+	if !ed25519.Verify(ed25519.PublicKey(pub), []byte(m.Version+"\n"+m.SHA256+"\n"+m.Arch), sig) {
+		t.Fatal("manifest signature did not verify")
 	}
 }
 

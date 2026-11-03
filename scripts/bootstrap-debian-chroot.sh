@@ -204,6 +204,11 @@ EOF
 chmod 600 "$HOST_DIR/agent.env"
 printf '%s\n' "$TOKEN" > "$HOST_DIR/agent.token"
 chmod 600 "$HOST_DIR/agent.token"
+if [ ! -s "$HOST_DIR/state/update.pub" ]; then
+  chroot "$ROOT" /bin/sh -c "mkdir -p '$INNER/state' && curl -fsSL -H 'Authorization: Bearer $TOKEN' '$SERVER/download/update.pub' -o '$INNER/state/update.pub'" 2>/dev/null || true
+  chroot "$ROOT" chown "$USER_NAME:$USER_NAME" "$INNER/state/update.pub" 2>/dev/null || true
+  chmod 644 "$HOST_DIR/state/update.pub" 2>/dev/null || true
+fi
 
 cat > "$HOST_DIR/run-agent.sh" <<EOF
 #!/bin/sh

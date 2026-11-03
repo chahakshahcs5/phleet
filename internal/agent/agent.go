@@ -257,6 +257,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.lagLoop(ctx)
 	go a.leaseLoop(ctx)
 	go a.capsLoop(ctx)
+	go a.updateLoop(ctx)
 	backoff := time.Second
 	attempt := 0
 	for {

@@ -2,7 +2,7 @@
 # On Windows use scripts/build.ps1 instead.
 
 BIN := dist
-VERSION := 0.10.0
+VERSION := 0.10.1
 
 .PHONY: all web build cli agent test clean
 

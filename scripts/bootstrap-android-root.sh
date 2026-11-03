@@ -129,6 +129,12 @@ EOF
 chmod 600 "$DIR/agent.env"
 printf '%s\n' "$TOKEN" > "$DIR/agent.token"
 chmod 600 "$DIR/agent.token"
+mkdir -p "$DIR/state"
+if [ ! -s "$DIR/state/update.pub" ]; then
+  curl -fsSL -H "Authorization: Bearer $TOKEN" \
+    "$SERVER/download/update.pub" -o "$DIR/state/update.pub" 2>/dev/null || true
+  [ -s "$DIR/state/update.pub" ] && chmod 644 "$DIR/state/update.pub"
+fi
 
 cat > "$DIR/run-agent.sh" <<EOF
 #!/system/bin/sh
