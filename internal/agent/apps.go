@@ -395,6 +395,12 @@ func (a *Agent) spawnProcess(p *appProcess, spec AppSpec) error {
 			spec.InternalPort = internalPort(spec.Port, false)
 		}
 		if p.proxy == nil {
+			// A previous agent or a direct (pre-switchboard) release may still
+			// hold the public port. Only kill a same-user orphan that we can
+			// identify; otherwise fail and leave the old release alone.
+			if err := a.ensurePortFree(context.Background(), spec.Port, spec.ReleaseDir, 2*time.Second); err != nil {
+				return err
+			}
 			proxy, err := newAppProxy(spec.Port)
 			if err != nil {
 				return err
