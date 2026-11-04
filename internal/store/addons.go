@@ -7,7 +7,7 @@ import (
 	"phleet/internal/model"
 )
 
-const addonCols = `id,name,slug,engine,kind,owner_project_id,pinned_server,port,data_dir,size_limit_mb,replication_mode,status,last_error,env_enc,config_enc,service,app_id,version,created_at,updated_at,hostname,bridge_port,epoch,auto_failover,failover_after_sec,max_lag_ms,lease_sec,lease_until`
+const addonCols = `id,name,slug,engine,kind,owner_project_id,pinned_server,port,data_dir,size_limit_mb,replication_mode,status,last_error,env_enc,config_enc,service,app_id,version,created_at,updated_at,hostname,bridge_port,epoch,auto_failover,failover_after_sec,max_lag_ms,lease_sec,lease_until,data_used_mb,usage_checked_at`
 
 func (s *Store) scanAddon(row interface{ Scan(...any) error }) (model.Addon, error) {
 	var a model.Addon
@@ -16,7 +16,8 @@ func (s *Store) scanAddon(row interface{ Scan(...any) error }) (model.Addon, err
 		&a.PinnedServer, &a.Port, &a.DataDir, &a.SizeLimitMB, &a.ReplicationMode,
 		&a.Status, &a.LastError, &a.EnvEnc, &a.ConfigEnc, &service, &a.AppID, &a.Version,
 		&a.CreatedAt, &a.UpdatedAt, &a.Hostname, &a.BridgePort, &a.Epoch,
-		&auto, &a.FailoverAfterSec, &a.MaxLagMS, &a.LeaseSec, &a.LeaseUntil)
+		&auto, &a.FailoverAfterSec, &a.MaxLagMS, &a.LeaseSec, &a.LeaseUntil,
+		&a.DataUsedMB, &a.UsageCheckedAt)
 	a.AutoFailover = auto != 0
 	a.Service = service != 0
 	if errors.Is(err, sql.ErrNoRows) {
@@ -451,18 +452,20 @@ func (s *Store) CreateBackup(b model.Backup) error {
 	if b.Status == "" {
 		b.Status = "running"
 	}
-	_, err := s.db.Exec(`INSERT INTO backups (id,addon_id,server_id,kind,status,size,checksum,encrypted,path,error,created_at,finished_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-		b.ID, b.AddonID, b.ServerID, b.Kind, b.Status, b.Size, b.Checksum, b.Encrypted, b.Path, b.Error, b.CreatedAt, b.FinishedAt)
+	_, err := s.db.Exec(`INSERT INTO backups (id,addon_id,server_id,kind,status,size,checksum,encrypted,path,remote_status,remote_key,remote_error,remote_at,error,created_at,finished_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		b.ID, b.AddonID, b.ServerID, b.Kind, b.Status, b.Size, b.Checksum, b.Encrypted, b.Path,
+		b.RemoteStatus, b.RemoteKey, b.RemoteError, b.RemoteAt, b.Error, b.CreatedAt, b.FinishedAt)
 	return err
 }
 
-const backupCols = `id,addon_id,server_id,kind,status,size,checksum,encrypted,path,error,created_at,finished_at`
+const backupCols = `id,addon_id,server_id,kind,status,size,checksum,encrypted,path,remote_status,remote_key,remote_error,remote_at,error,created_at,finished_at`
 
 func (s *Store) scanBackup(row interface{ Scan(...any) error }) (model.Backup, error) {
 	var b model.Backup
 	var encrypted int
-	err := row.Scan(&b.ID, &b.AddonID, &b.ServerID, &b.Kind, &b.Status, &b.Size, &b.Checksum, &encrypted, &b.Path, &b.Error, &b.CreatedAt, &b.FinishedAt)
+	err := row.Scan(&b.ID, &b.AddonID, &b.ServerID, &b.Kind, &b.Status, &b.Size, &b.Checksum, &encrypted, &b.Path,
+		&b.RemoteStatus, &b.RemoteKey, &b.RemoteError, &b.RemoteAt, &b.Error, &b.CreatedAt, &b.FinishedAt)
 	b.Encrypted = encrypted != 0
 	if errors.Is(err, sql.ErrNoRows) {
 		return b, ErrNotFound
@@ -507,6 +510,11 @@ func (s *Store) SetBackupEncrypted(id string) error {
 func (s *Store) FinishBackup(id, status string, size int64, path, errMsg string) error {
 	_, err := s.db.Exec(`UPDATE backups SET status=?, size=?, path=?, error=?, finished_at=? WHERE id=?`,
 		status, size, path, errMsg, now(), id)
+	return err
+}
+
+func (s *Store) SetAddonUsage(id string, usedMB, checkedAt int64) error {
+	_, err := s.db.Exec(`UPDATE addons SET data_used_mb=?, usage_checked_at=? WHERE id=?`, usedMB, checkedAt, id)
 	return err
 }
 

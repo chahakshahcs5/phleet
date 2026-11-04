@@ -58,6 +58,12 @@ export default function Events() {
   const first = events.length === 0 ? 0 : pageIndex * pageSize + 1
   const last = events.length === 0 ? 0 : pageIndex * pageSize + events.length
   const filtering = !!action || !!query
+  const exportURL = (format: 'csv' | 'json') => {
+    const p = new URLSearchParams({ format })
+    if (action) p.set('action', action)
+    if (query) p.set('q', query)
+    return `/api/events/export?${p.toString()}`
+  }
 
   const reset = () => setCursors([0])
 
@@ -68,9 +74,23 @@ export default function Events() {
           <h1 className="text-xl font-semibold tracking-tight text-zinc-100">Events</h1>
           <p className="mt-0.5 text-xs text-zinc-500">Agent connections, commands and file changes across the fleet.</p>
         </div>
-        <Button size="sm" variant="ghost" onClick={() => q.refetch()}>
-          {q.isFetching ? <Spinner className="h-3 w-3" /> : <RefreshCw size={13} />} Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <a
+            href={exportURL('csv')}
+            className="rounded-md px-2 py-1 text-[10px] text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
+          >
+            Export CSV
+          </a>
+          <a
+            href={exportURL('json')}
+            className="rounded-md px-2 py-1 text-[10px] text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
+          >
+            JSON
+          </a>
+          <Button size="sm" variant="ghost" onClick={() => q.refetch()}>
+            {q.isFetching ? <Spinner className="h-3 w-3" /> : <RefreshCw size={13} />} Refresh
+          </Button>
+        </div>
       </div>
 
       <div className="mt-5 flex flex-wrap items-center gap-2">

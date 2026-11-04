@@ -177,3 +177,18 @@ func TestAddonLogs(t *testing.T) {
 		t.Fatalf("logs are not chronological: %+v", logs)
 	}
 }
+
+func TestAddonUsageFields(t *testing.T) {
+	st := newTestStore(t)
+	a := model.Addon{ID: "u1", Name: "Usage", Slug: "usage", Engine: "sqlite", Kind: "database", SizeLimitMB: 100}
+	if err := st.CreateAddon(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetAddonUsage("u1", 123, 456); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetAddon("u1")
+	if err != nil || got.DataUsedMB != 123 || got.UsageCheckedAt != 456 || got.SizeLimitMB != 100 {
+		t.Fatalf("usage fields: %v %+v", err, got)
+	}
+}

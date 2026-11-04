@@ -144,11 +144,20 @@ func janitor(ctx context.Context, st *store.Store, log *slog.Logger) {
 			if err := st.PruneMetrics(cutoff); err != nil {
 				log.Warn("prune metrics", "err", err)
 			}
+			if err := st.PruneAppMetrics(cutoff); err != nil {
+				log.Warn("prune app metrics", "err", err)
+			}
+			if err := st.PruneRequestLogs(time.Now().Add(-7 * 24 * time.Hour).Unix()); err != nil {
+				log.Warn("prune request logs", "err", err)
+			}
 			if err := st.PruneProjectHistory(time.Now().Add(-30 * 24 * time.Hour).Unix()); err != nil {
 				log.Warn("prune deployment history", "err", err)
 			}
 			if err := st.PruneAlerts(time.Now().Add(-90 * 24 * time.Hour).Unix()); err != nil {
 				log.Warn("prune alerts", "err", err)
+			}
+			if err := st.PruneDrills(time.Now().Add(-90 * 24 * time.Hour).Unix()); err != nil {
+				log.Warn("prune restore drills", "err", err)
 			}
 			if err := st.PruneAddonLogs(time.Now().Add(-30 * 24 * time.Hour).Unix()); err != nil {
 				log.Warn("prune addon logs", "err", err)

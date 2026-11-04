@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  Activity,
   ArrowLeft,
+  Cpu,
   Database,
   ExternalLink,
   FileText,
@@ -24,14 +26,16 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api'
 import type { Deployment, ProjectView } from '../types'
-import { ConfirmDialog } from '../components/Dialog'
-import { Badge, Button, Card, DeployBadge, EmptyState, KeyValue, Spinner, cn } from '../components/ui'
+import { ConfirmDialog, Dialog } from '../components/Dialog'
+import { Badge, Button, Card, DeployBadge, EmptyState, KeyValue, Sparkline, Spinner, cn } from '../components/ui'
+import WebhookCard from '../components/WebhookCard'
 import { ago, bytes, time } from '../lib/format'
 import { envToString, parseEnv } from '../lib/env'
+import { useAppLogStream } from '../lib/logstream'
 import { aggregateStatus, onlineReplicas } from '../lib/projects'
 import { zipSelection } from '../lib/zip'
 
-type Tab = 'overview' | 'deployments' | 'logs' | 'settings'
+type Tab = 'overview' | 'deployments' | 'logs' | 'requests' | 'settings'
 
 const NON_TERMINAL = new Set(['queued', 'building', 'starting', 'health_check'])
 
@@ -51,6 +55,8 @@ export default function ProjectDetail() {
   const [logServer, setLogServer] = useState('')
   const [follow, setFollow] = useState(true)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [releasesOpen, setReleasesOpen] = useState(false)
+  const [refDeployOpen, setRefDeployOpen] = useState(false)
   const logRef = useRef<HTMLPreElement>(null)
   const deployLogRef = useRef<HTMLPreElement>(null)
 
@@ -76,12 +82,12 @@ export default function ProjectDetail() {
       return d && !NON_TERMINAL.has(d.deployment.status) ? false : 1500
     },
   })
-  const appLogs = useQuery({
-    queryKey: ['applogs', id, logServer],
-    queryFn: () => api.appLogs(id, logServer || undefined),
-    enabled: !!id && tab === 'logs' && !!logServer,
-    refetchInterval: tab === 'logs' ? 3000 : false,
-    retry: false,
+  const appLogs = useAppLogStream(id, logServer, tab === 'logs')
+  const requests = useQuery({
+    queryKey: ['requests', id],
+    queryFn: () => api.projectRequests(id, 200),
+    enabled: !!id && tab === 'requests',
+    refetchInterval: tab === 'requests' ? 3000 : false,
   })
 
   const project = query.data?.project
@@ -102,7 +108,7 @@ export default function ProjectDetail() {
 
   useEffect(() => {
     if (follow && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
-  }, [appLogs.dataUpdatedAt, follow])
+  }, [appLogs.logs, follow])
 
   useEffect(() => {
     if (deployLogRef.current) deployLogRef.current.scrollTop = deployLogRef.current.scrollHeight
@@ -165,8 +171,9 @@ export default function ProjectDetail() {
       ? placementCaps.every((c) => c?.userland === false)
       : (servers.data?.servers.filter((s) => s.online).length ?? 0) > 0 &&
         servers.data!.servers.filter((s) => s.online).every((s) => s.caps.userland === false)
+  const kind = project.kind ?? 'app'
   const canDeploy =
-    hasSource && !!project.startCmd && anyServerOnline && !noUserland && !deploy.isPending && !latestBusy
+    hasSource && (kind === 'static' || !!project.startCmd) && anyServerOnline && !noUserland && !deploy.isPending && !latestBusy
   const canAct = project.placements.length > 0 && anyOnline && !action.isPending
   const serverNames = [...new Set(project.placements.map((p) => p.serverName || p.serverId))].join(', ')
   const failedActions = action.data?.results.filter((r) => !r.ok) ?? []
@@ -196,14 +203,20 @@ export default function ProjectDetail() {
               {!anyOnline && project.placements.length > 0 ? <Badge tone="bad">replicas offline</Badge> : null}
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-500">
-              <a
-                href={project.url}
-                target="_blank"
-                rel="noreferrer"
-                className="flex items-center gap-1 font-mono text-zinc-400 hover:text-emerald-300"
-              >
-                <Globe size={10} /> {project.customHostname || project.hostname} <ExternalLink size={9} />
-              </a>
+              {project.hostname ? (
+                <a
+                  href={project.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-1 font-mono text-zinc-400 hover:text-emerald-300"
+                >
+                  <Globe size={10} /> {project.customHostname || project.hostname} <ExternalLink size={9} />
+                </a>
+              ) : (
+                <span className="flex items-center gap-1 font-mono text-zinc-600">
+                  <Server size={10} /> worker · no public URL
+                </span>
+              )}
               <span className="flex items-center gap-1">
                 <Layers size={10} /> {onlineReplicas(project)}/{project.replicas} replicas online
               </span>
@@ -275,6 +288,7 @@ export default function ProjectDetail() {
               { id: 'overview', label: 'Overview', icon: <Globe size={14} /> },
               { id: 'deployments', label: 'Deployments', icon: <History size={14} /> },
               { id: 'logs', label: 'Logs', icon: <FileText size={14} /> },
+              { id: 'requests', label: 'Requests', icon: <Activity size={14} /> },
               { id: 'settings', label: 'Settings', icon: <SettingsIcon size={14} /> },
             ] as { id: Tab; label: string; icon: React.ReactNode }[]
           ).map((t) => (
@@ -300,8 +314,18 @@ export default function ProjectDetail() {
         {tab === 'deployments' ? (
           <div className="grid gap-3 lg:grid-cols-[300px_minmax(0,1fr)]">
             <Card className="overflow-hidden">
-              <div className="border-b border-zinc-800/70 px-3 py-2 text-[10px] tracking-wider text-zinc-500 uppercase">
-                history
+              <div className="flex items-center justify-between border-b border-zinc-800/70 px-3 py-1.5">
+                <span className="text-[10px] tracking-wider text-zinc-500 uppercase">history</span>
+                <div className="flex items-center gap-1">
+                  {project.sourceType === 'git' ? (
+                    <Button size="sm" variant="ghost" onClick={() => setRefDeployOpen(true)}>
+                      <Play size={12} /> Deploy ref
+                    </Button>
+                  ) : null}
+                  <Button size="sm" variant="ghost" onClick={() => setReleasesOpen(true)}>
+                    <RotateCw size={12} /> Releases
+                  </Button>
+                </div>
               </div>
               <div className="max-h-[calc(100vh-330px)] divide-y divide-zinc-800/50 overflow-y-auto">
                 {(deployments.data?.deployments ?? []).map((d) => (
@@ -392,20 +416,21 @@ export default function ProjectDetail() {
                   >
                     {project.placements.map((p) => (
                       <option key={p.serverId} value={p.serverId}>
-                        {p.serverName || p.serverId} :{p.port}
+                        {p.serverName || p.serverId} {p.port ? `:${p.port}` : ''}
                       </option>
                     ))}
                   </select>
                 ) : null}
-                <Badge>{appLogs.data ? bytes(appLogs.data.size) : '—'}</Badge>
-                {appLogs.data?.truncated ? <Badge tone="warn">tail only</Badge> : null}
+                <Badge>{bytes(appLogs.size)}</Badge>
+                {appLogs.truncated ? <Badge tone="warn">tail only</Badge> : null}
+                {appLogs.connected ? <Badge tone="good">live</Badge> : null}
                 {!anyOnline ? <Badge tone="bad">offline</Badge> : null}
               </div>
               <div className="flex items-center gap-1">
                 <label className="flex cursor-pointer items-center gap-1 text-[10px] text-zinc-500">
                   <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} /> follow
                 </label>
-                <Button size="icon" variant="ghost" onClick={() => appLogs.refetch()}>
+                <Button size="icon" variant="ghost" onClick={() => appLogs.reconnect()} title="Reconnect">
                   <RefreshCw size={12} />
                 </Button>
               </div>
@@ -420,12 +445,85 @@ export default function ProjectDetail() {
             >
               {project.placements.length === 0
                 ? 'no replica yet — deploy the project first'
-                : appLogs.data?.logs ||
-                  (appLogs.isError ? String(appLogs.error) : 'no output yet — deploy the project first')}
+                : appLogs.logs ||
+                  appLogs.error ||
+                  (appLogs.connected ? 'no output yet' : 'connecting to the phone…')}
             </pre>
             <div className="border-t border-zinc-800/70 px-3 py-1.5 font-mono text-[10px] text-zinc-600">
-              {appLogs.data?.path || '~/apps/' + project.slug + '/logs/app.log'}
+              {appLogs.path || '~/apps/' + project.slug + '/logs/app.log'}
             </div>
+          </Card>
+        ) : null}
+
+        {tab === 'requests' ? (
+          <Card className="overflow-hidden">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/70 px-4 py-2.5">
+              <div className="flex items-center gap-2 text-[11px] text-zinc-400">
+                <Activity size={12} className="text-zinc-500" /> requests through the public edge
+              </div>
+              <div className="flex items-center gap-2 text-[10px] text-zinc-600">
+                <span>{requests.data?.requests.length ?? 0} in the last 24h</span>
+                <span>· newest first</span>
+              </div>
+            </div>
+            {requests.isLoading ? (
+              <div className="p-6 text-center text-xs text-zinc-500">loading…</div>
+            ) : requests.isError ? (
+              <div className="p-6 text-center text-[11px] text-red-400">{String(requests.error)}</div>
+            ) : (requests.data?.requests ?? []).length === 0 ? (
+              <EmptyState icon={<Activity size={20} />} title="No requests logged yet">
+                <p>Requests routed to this project appear here. Only public edge traffic is recorded.</p>
+              </EmptyState>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-[11px]">
+                  <thead className="bg-zinc-950/40 text-[9px] tracking-wider text-zinc-500 uppercase">
+                    <tr>
+                      <th className="px-4 py-2 font-medium">Time</th>
+                      <th className="px-3 py-2 font-medium">Method</th>
+                      <th className="px-3 py-2 font-medium">Path</th>
+                      <th className="px-3 py-2 font-medium">Status</th>
+                      <th className="px-3 py-2 font-medium">Duration</th>
+                      <th className="px-3 py-2 font-medium">Size</th>
+                      <th className="px-3 py-2 font-medium">Phone</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-800/50">
+                    {(requests.data?.requests ?? []).map((r) => (
+                      <tr key={r.id} className="hover:bg-zinc-800/20">
+                        <td className="whitespace-nowrap px-4 py-2 text-zinc-500">{time(r.ts)}</td>
+                        <td className="px-3 py-2 font-mono text-zinc-400">{r.method}</td>
+                        <td className="max-w-[360px] truncate px-3 py-2 font-mono text-zinc-300" title={r.path}>
+                          {r.path}
+                        </td>
+                        <td className="px-3 py-2">
+                          <span
+                            className={cn(
+                              'font-mono',
+                              r.status >= 500
+                                ? 'text-red-300'
+                                : r.status >= 400
+                                  ? 'text-amber-300'
+                                  : r.status >= 300
+                                    ? 'text-sky-300'
+                                    : 'text-emerald-300',
+                            )}
+                          >
+                            {r.status || '—'}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 font-mono text-zinc-500">{r.durationMs} ms</td>
+                        <td className="px-3 py-2 font-mono text-zinc-500">{bytes(r.bytes)}</td>
+                        <td className="max-w-[140px] truncate px-3 py-2 text-zinc-500" title={r.ip}>
+                          {project.placements.find((p) => p.serverId === r.serverId)?.serverName ||
+                            r.serverId.slice(0, 8)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </Card>
         ) : null}
 
@@ -438,6 +536,9 @@ export default function ProjectDetail() {
           />
         ) : null}
       </div>
+
+      {releasesOpen ? <ReleasesDialog project={project} onClose={() => setReleasesOpen(false)} /> : null}
+      {refDeployOpen ? <RefDeployDialog project={project} onClose={() => setRefDeployOpen(false)} /> : null}
 
       <ConfirmDialog
         open={deleteOpen}
@@ -456,8 +557,328 @@ export default function ProjectDetail() {
   )
 }
 
+function RefDeployDialog({ project, onClose }: { project: ProjectView; onClose: () => void }) {
+  const qc = useQueryClient()
+  const [ref, setRef] = useState(project.branch || 'main')
+  const deploy = useMutation({
+    mutationFn: () => api.deployProjectRef(project.id, ref.trim()),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['deployments', project.id] })
+      qc.invalidateQueries({ queryKey: ['project', project.id] })
+      qc.invalidateQueries({ queryKey: ['projects'] })
+      onClose()
+    },
+  })
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title="Deploy a branch, tag or commit"
+      description="The phone clones this ref shallowly. A commit that is not the branch tip is fetched explicitly."
+      width="max-w-md"
+      busy={deploy.isPending}
+      footer={
+        <>
+          <Button type="button" variant="ghost" onClick={onClose} disabled={deploy.isPending}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            variant="primary"
+            disabled={deploy.isPending || !ref.trim()}
+            onClick={() => deploy.mutate()}
+          >
+            {deploy.isPending ? <Spinner className="h-3 w-3 border-zinc-900/40 border-t-zinc-900" /> : <Play size={12} />}
+            Deploy
+          </Button>
+        </>
+      }
+    >
+      <div className="text-[10px] font-medium tracking-widest text-zinc-500 uppercase">Ref</div>
+      <input
+        className="mt-1 h-9 w-full rounded-lg border border-zinc-800 bg-zinc-950/70 px-3 font-mono text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-emerald-400/40"
+        value={ref}
+        onChange={(e) => setRef(e.target.value)}
+        placeholder="v1.2.3 or a commit SHA"
+        data-autofocus
+      />
+      <p className="mt-2 text-[10px] leading-relaxed text-zinc-600">
+        Configured branch: <span className="font-mono">{project.branch || 'main'}</span>. Leave it unchanged
+        to deploy the branch tip, or paste a tag or commit SHA.
+      </p>
+      {deploy.isError ? <div className="mt-3 text-[11px] text-red-400">{String(deploy.error)}</div> : null}
+    </Dialog>
+  )
+}
+
+function ReleasesDialog({ project, onClose }: { project: ProjectView; onClose: () => void }) {
+  const qc = useQueryClient()
+  const [serverId, setServerId] = useState(
+    () => (project.placements.find((p) => p.online) ?? project.placements[0])?.serverId ?? '',
+  )
+  const [confirm, setConfirm] = useState<string | null>(null)
+  useEffect(() => {
+    if (!serverId && project.placements.length > 0) setServerId(project.placements[0].serverId)
+  }, [project.placements, serverId])
+
+  const releases = useQuery({
+    queryKey: ['releases', project.id, serverId],
+    queryFn: () => api.projectReleases(project.id, serverId),
+    enabled: !!serverId,
+    retry: false,
+  })
+  const rollback = useMutation({
+    mutationFn: (release: string) => api.rollbackRelease(project.id, serverId, release),
+    onSuccess: () => {
+      setConfirm(null)
+      qc.invalidateQueries({ queryKey: ['releases', project.id, serverId] })
+      qc.invalidateQueries({ queryKey: ['project', project.id] })
+      qc.invalidateQueries({ queryKey: ['deployments', project.id] })
+    },
+  })
+
+  return (
+    <>
+      <Dialog
+        open
+        onClose={onClose}
+        title="Releases"
+        description="Each phone keeps the last five releases. Rolling back restarts that release and health-checks it before switching traffic."
+        width="max-w-2xl"
+        footer={
+          <Button type="button" variant="primary" onClick={onClose}>
+            Close
+          </Button>
+        }
+      >
+        {project.placements.length > 1 ? (
+          <div className="mb-3 flex items-center gap-2">
+            <span className="text-[10px] font-medium tracking-widest text-zinc-500 uppercase">Phone</span>
+            <select
+              value={serverId}
+              onChange={(e) => setServerId(e.target.value)}
+              className="h-8 rounded-md border border-zinc-800 bg-zinc-950 px-2 text-[11px] text-zinc-300 outline-none"
+            >
+              {project.placements.map((pl) => (
+                <option key={pl.serverId} value={pl.serverId}>
+                  {pl.serverName || pl.serverId} {pl.online ? '' : '· offline'}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : null}
+
+        {releases.isLoading ? (
+          <div className="py-6 text-center text-xs text-zinc-500">loading releases…</div>
+        ) : releases.isError ? (
+          <div className="rounded-lg border border-red-900/40 bg-red-500/5 p-3 text-[11px] text-red-300">
+            {String(releases.error)}
+          </div>
+        ) : (releases.data?.releases ?? []).length === 0 ? (
+          <div className="py-6 text-center text-xs text-zinc-500">No releases on this phone yet.</div>
+        ) : (
+          <div className="max-h-[50vh] overflow-y-auto rounded-lg border border-zinc-800/70">
+            <table className="w-full text-left text-[11px]">
+              <thead className="bg-zinc-950/40 text-[9px] tracking-wider text-zinc-500 uppercase">
+                <tr>
+                  <th className="px-3 py-2 font-medium">Release</th>
+                  <th className="px-3 py-2 font-medium">Created</th>
+                  <th className="px-3 py-2 text-right font-medium">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-800/50">
+                {(releases.data?.releases ?? []).map((release) => (
+                  <tr key={release.name} className="hover:bg-zinc-800/20">
+                    <td className="px-3 py-2 font-mono text-zinc-300">
+                      {release.name} {release.current ? <Badge tone="good">current</Badge> : null}
+                    </td>
+                    <td className="px-3 py-2 text-zinc-500">{time(release.modifiedAt)}</td>
+                    <td className="px-3 py-2 text-right">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={release.current || rollback.isPending || !project.placements.find((p) => p.serverId === serverId)?.online}
+                        onClick={() => setConfirm(release.name)}
+                        title={release.current ? 'Already running' : 'Roll back to this release'}
+                      >
+                        <RotateCw size={12} /> Roll back
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {rollback.isError ? (
+          <div className="mt-3 text-[11px] text-red-400">{String(rollback.error)}</div>
+        ) : null}
+        {rollback.isSuccess ? (
+          <div className="mt-3 text-[11px] text-emerald-300">rolled back — health check passed</div>
+        ) : null}
+      </Dialog>
+
+      <ConfirmDialog
+        open={!!confirm}
+        onClose={() => setConfirm(null)}
+        title="Roll back to this release?"
+        description={
+          confirm
+            ? `The phone restarts ${confirm}, health-checks it, then switches traffic. The currently running release is kept for another rollback.`
+            : ''
+        }
+        confirmLabel="Roll back"
+        danger
+        busy={rollback.isPending}
+        onConfirm={() => confirm && rollback.mutate(confirm)}
+      />
+    </>
+  )
+}
+
+function Resources({ project }: { project: ProjectView }) {
+  const isStatic = project.kind === 'static'
+  const metrics = useQuery({
+    queryKey: ['appmetrics', project.id, 60],
+    queryFn: () => api.projectMetrics(project.id, 60),
+    enabled: !isStatic,
+    refetchInterval: 30000,
+  })
+  const samples = metrics.data?.samples ?? []
+  const last = samples[samples.length - 1]
+  const cpu = samples.map((s) => s.cpuPercent)
+  const rss = samples.map((s) => s.rss)
+
+  return (
+    <Card className="p-4 lg:col-span-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 text-[10px] font-medium tracking-widest text-zinc-500 uppercase">
+          <Cpu size={12} /> Resources
+        </div>
+        <span className="text-[10px] text-zinc-600">
+          {isStatic ? 'static site · served by the agent' : 'process group · last 60 minutes'}
+        </span>
+      </div>
+      {isStatic ? (
+        <p className="mt-3 text-[11px] leading-relaxed text-zinc-600">
+          A static site has no application process. The agent serves it directly, so per-app CPU and memory
+          do not apply.
+        </p>
+      ) : metrics.isError ? (
+        <p className="mt-3 text-[11px] text-red-400/80">resource metrics unavailable</p>
+      ) : (
+        <div className="mt-3 grid gap-4 sm:grid-cols-2">
+          <div>
+            <div className="flex items-center justify-between text-[10px] text-zinc-500">
+              <span>CPU</span>
+              <span className="font-mono text-zinc-300">{last ? `${last.cpuPercent.toFixed(0)}%` : '—'}</span>
+            </div>
+            <div className="mt-1">
+              {cpu.length > 1 ? (
+                <Sparkline values={cpu} height={40} />
+              ) : (
+                <div className="h-[40px] text-[10px] text-zinc-600">collecting…</div>
+              )}
+            </div>
+          </div>
+          <div>
+            <div className="flex items-center justify-between text-[10px] text-zinc-500">
+              <span>Memory</span>
+              <span className="font-mono text-zinc-300">{last ? bytes(last.rss) : '—'}</span>
+            </div>
+            <div className="mt-1">
+              {rss.length > 1 ? (
+                <Sparkline values={rss} height={40} stroke="var(--accent-2)" />
+              ) : (
+                <div className="h-[40px] text-[10px] text-zinc-600">collecting…</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function SecretFilesCard({ projectId }: { projectId: string }) {
+  const qc = useQueryClient()
+  const list = useQuery({ queryKey: ['project-secrets', projectId], queryFn: () => api.projectSecrets(projectId) })
+  const [name, setName] = useState('')
+  const [content, setContent] = useState('')
+  const save = useMutation({
+    mutationFn: () => api.putProjectSecret(projectId, name.trim(), content),
+    onSuccess: () => {
+      setName('')
+      setContent('')
+      qc.invalidateQueries({ queryKey: ['project-secrets', projectId] })
+    },
+  })
+  const remove = useMutation({
+    mutationFn: (n: string) => api.deleteProjectSecret(projectId, n),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['project-secrets', projectId] }),
+  })
+  const input =
+    'h-8 w-full rounded-lg border border-zinc-800 bg-zinc-950/70 px-2.5 font-mono text-[11px] text-zinc-200 outline-none focus:border-emerald-400/40'
+  return (
+    <Card className="p-4">
+      <div className="text-[10px] font-medium tracking-widest text-zinc-500 uppercase">Secret files</div>
+      <p className="mt-1 text-[10px] leading-relaxed text-zinc-600">
+        Written to <span className="font-mono">$PHLEET_SECRETS_DIR</span> on the phone at deploy time (mode 0600).
+        Contents are never shown again; enter a new value to replace one.
+      </p>
+      <div className="mt-2 space-y-1">
+        {(list.data?.secrets ?? []).map((s) => (
+          <div key={s.name} className="flex items-center justify-between gap-2 rounded-md bg-zinc-950/50 px-2 py-1">
+            <span className="truncate font-mono text-[10px] text-zinc-300">{s.name}</span>
+            <button
+              type="button"
+              onClick={() => remove.mutate(s.name)}
+              className="rounded p-1 text-zinc-500 hover:bg-red-500/10 hover:text-red-300"
+              aria-label={`Delete ${s.name}`}
+            >
+              <Trash2 size={11} />
+            </button>
+          </div>
+        ))}
+        {(list.data?.secrets ?? []).length === 0 ? (
+          <div className="text-[10px] text-zinc-600">No secret files.</div>
+        ) : null}
+      </div>
+      <div className="mt-2 grid gap-1.5">
+        <input
+          className={input}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="service-account.json"
+        />
+        <textarea
+          className="min-h-16 w-full resize-y rounded-lg border border-zinc-800 bg-zinc-950/70 p-2 font-mono text-[10px] text-zinc-200 outline-none focus:border-emerald-400/40"
+          value={content}
+          onChange={(e) => setContent(e.target.value)}
+          placeholder="file content"
+        />
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!name.trim() || !content || save.isPending}
+          onClick={() => save.mutate()}
+        >
+          {save.isPending ? <Spinner className="h-3 w-3" /> : <Save size={12} />} Save secret file
+        </Button>
+        {save.isError ? <div className="text-[10px] text-red-400">{String(save.error)}</div> : null}
+        {remove.isError ? <div className="text-[10px] text-red-400">{String(remove.error)}</div> : null}
+      </div>
+    </Card>
+  )
+}
+
 function Overview({ project, onDeploy, canDeploy }: { project: ProjectView; onDeploy: () => void; canDeploy: boolean }) {
   const envKeys = Object.keys(project.env ?? {})
+  const uptime = useQuery({
+    queryKey: ['uptime', project.id],
+    queryFn: () => api.projectUptime(project.id),
+    refetchInterval: 60000,
+  })
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <Card className="p-4">
@@ -479,12 +900,32 @@ function Overview({ project, onDeploy, canDeploy }: { project: ProjectView; onDe
           </Button>
         </div>
         <div className="mt-4 divide-y divide-zinc-800/60">
-          <KeyValue label="URL">
-            <a href={project.url} target="_blank" rel="noreferrer" className="text-emerald-300/90 hover:text-emerald-200">
-              {project.customHostname || project.hostname}
-            </a>
+          <KeyValue label="Kind">
+            {project.kind === 'static' ? 'static site' : project.kind === 'worker' ? 'worker (no port)' : 'web app'}
           </KeyValue>
+          {project.kind === 'worker' ? (
+            <KeyValue label="URL">no public URL</KeyValue>
+          ) : (
+            <KeyValue label="URL">
+              <a href={project.url} target="_blank" rel="noreferrer" className="text-emerald-300/90 hover:text-emerald-200">
+                {project.customHostname || project.hostname}
+              </a>
+            </KeyValue>
+          )}
           <KeyValue label="Replicas">{`${project.placements.length} / ${project.replicas}`}</KeyValue>
+          <KeyValue label="Access">{project.basicAuth ? `basic auth · ${project.basicAuthUser || 'user'}` : 'public'}</KeyValue>
+          <KeyValue label="Edge check">
+            {uptime.data?.uptime ? (
+              <span className="flex items-center gap-1.5">
+                <Badge tone={uptime.data.uptime.ok ? 'good' : 'bad'}>
+                  {uptime.data.uptime.ok ? 'up' : 'down'}
+                </Badge>
+                <span className="text-[10px] text-zinc-600">{ago(uptime.data.uptime.checkedAt)}</span>
+              </span>
+            ) : (
+              '—'
+            )}
+          </KeyValue>
           <KeyValue label="Selector">{project.selector || (project.pinnedServer ? 'pinned' : 'any phone')}</KeyValue>
           <KeyValue label="Pinned to">{project.pinnedServer || '—'}</KeyValue>
         </div>
@@ -495,7 +936,7 @@ function Overview({ project, onDeploy, canDeploy }: { project: ProjectView; onDe
         <div className="mt-3 divide-y divide-zinc-800/60">
           {project.sourceType === 'upload' ? (
             <>
-              <KeyValue label="Kind">uploaded folder</KeyValue>
+              <KeyValue label="Source">uploaded folder</KeyValue>
               <KeyValue label="Size">{bytes(project.sourceSize)}</KeyValue>
               <KeyValue label="Updated">{project.sourceUpdatedAt ? time(project.sourceUpdatedAt) : '—'}</KeyValue>
             </>
@@ -510,13 +951,21 @@ function Overview({ project, onDeploy, canDeploy }: { project: ProjectView; onDe
           <KeyValue label="Build">
             <span className="font-mono">{project.buildCmd || '(none)'}</span>
           </KeyValue>
-          <KeyValue label="Start">
-            <span className="font-mono">{project.startCmd || '(not set)'}</span>
-          </KeyValue>
-          <KeyValue label="Health">{project.healthPath}</KeyValue>
+          {project.kind === 'static' ? (
+            <KeyValue label="Static dir">
+              <span className="font-mono">{project.staticDir || '(release root)'}</span>
+            </KeyValue>
+          ) : (
+            <KeyValue label="Start">
+              <span className="font-mono">{project.startCmd || '(not set)'}</span>
+            </KeyValue>
+          )}
+          {project.kind === 'app' || !project.kind ? <KeyValue label="Health">{project.healthPath}</KeyValue> : null}
           <KeyValue label="Created">{time(project.createdAt)}</KeyValue>
         </div>
       </Card>
+
+      <Resources project={project} />
 
       <Card className="overflow-hidden lg:col-span-2">
         <div className="flex items-center justify-between border-b border-zinc-800/70 px-4 py-2.5">
@@ -556,7 +1005,7 @@ function Overview({ project, onDeploy, canDeploy }: { project: ProjectView; onDe
                       <DeployBadge status={pl.status} />
                     </td>
                     <td className="px-3 py-2 text-zinc-500">{pl.desired}</td>
-                    <td className="px-3 py-2 font-mono text-zinc-400">{pl.port}</td>
+                    <td className="px-3 py-2 font-mono text-zinc-400">{pl.port || '—'}</td>
                     <td className="px-3 py-2 font-mono text-zinc-500">{pl.pid || '—'}</td>
                     <td className="px-3 py-2 font-mono text-zinc-500">{pl.restarts}</td>
                     <td className="max-w-[240px] truncate px-4 py-2 text-[10px] text-red-300/80" title={pl.lastError}>
@@ -587,8 +1036,25 @@ function Overview({ project, onDeploy, canDeploy }: { project: ProjectView; onDe
           )}
         </div>
         <p className="mt-3 flex items-center gap-1 text-[10px] text-zinc-600">
-          <Server size={10} /> apps are started with <span className="font-mono">PORT</span>,{' '}
-          <span className="font-mono">HOST=0.0.0.0</span> and <span className="font-mono">NODE_ENV=production</span>.
+          <Server size={10} />{' '}
+          {project.kind === 'worker' ? (
+            <>
+              workers get <span className="font-mono">NODE_ENV=production</span>,{' '}
+              <span className="font-mono">PHLEET_APP</span>, <span className="font-mono">PHLEET_WORKER=1</span> and{' '}
+              <span className="font-mono">PHLEET_DATA_DIR</span> (no <span className="font-mono">PORT</span>).
+            </>
+          ) : project.kind === 'static' ? (
+            <>the agent serves the release directory directly; no process env is injected.</>
+          ) : (
+            <>
+              apps are started with <span className="font-mono">PORT</span>,{' '}
+              <span className="font-mono">HOST=127.0.0.1</span>, <span className="font-mono">NODE_ENV=production</span>{' '}
+              and <span className="font-mono">PHLEET_DATA_DIR</span>.
+            </>
+          )}
+        </p>
+        <p className="mt-1 text-[10px] text-zinc-600">
+          <span className="font-mono">PHLEET_DATA_DIR</span> survives deploys; the release directory does not.
         </p>
       </Card>
 
@@ -716,6 +1182,7 @@ function SettingsTab({
     branch: project.branch,
     buildCmd: project.buildCmd,
     startCmd: project.startCmd,
+    staticDir: project.staticDir ?? '',
     healthPath: project.healthPath,
     customHostname: project.customHostname ?? '',
     envText: envToString(project.env),
@@ -726,6 +1193,9 @@ function SettingsTab({
   const [sourceFiles, setSourceFiles] = useState<FileList | null>(null)
   const [sourceMsg, setSourceMsg] = useState('')
   const [sourceErr, setSourceErr] = useState('')
+  const [basicUser, setBasicUser] = useState(project.basicAuthUser ?? '')
+  const [basicPass, setBasicPass] = useState('')
+  const [clearBasic, setClearBasic] = useState(false)
 
   const uploadSource = useMutation({
     mutationFn: async () => {
@@ -742,6 +1212,10 @@ function SettingsTab({
     onError: (e) => setSourceErr(String(e)),
   })
 
+  const createDomain = useMutation({
+    mutationFn: () => api.createCustomDomain(project.id),
+  })
+
   const update = useMutation({
     mutationFn: () =>
       api.updateProject(project.id, {
@@ -750,7 +1224,11 @@ function SettingsTab({
         branch: form.branch,
         buildCmd: form.buildCmd,
         startCmd: form.startCmd,
+        staticDir: form.staticDir,
         healthPath: form.healthPath,
+        basicAuthUser: basicUser,
+        basicAuthPassword: basicPass,
+        clearBasicAuth: clearBasic,
         customHostname: form.customHostname,
         env: parseEnv(form.envText),
         replicas: form.replicas,
@@ -788,14 +1266,29 @@ function SettingsTab({
               </div>
             </>
           ) : null}
-          <div>
-            <div className={caption}>Start command</div>
-            <input className={`${field} mt-1 font-mono`} value={form.startCmd} onChange={(e) => setForm({ ...form, startCmd: e.target.value })} />
-          </div>
-          <div>
-            <div className={caption}>Health path</div>
-            <input className={`${field} mt-1 font-mono`} value={form.healthPath} onChange={(e) => setForm({ ...form, healthPath: e.target.value })} />
-          </div>
+          {project.kind === 'static' ? (
+            <div>
+              <div className={caption}>Static directory</div>
+              <input
+                className={`${field} mt-1 font-mono`}
+                value={form.staticDir}
+                onChange={(e) => setForm({ ...form, staticDir: e.target.value })}
+                placeholder="dist (blank = release root)"
+              />
+            </div>
+          ) : (
+            <div>
+              <div className={caption}>Start command</div>
+              <input className={`${field} mt-1 font-mono`} value={form.startCmd} onChange={(e) => setForm({ ...form, startCmd: e.target.value })} />
+            </div>
+          )}
+          {(project.kind ?? 'app') === 'app' ? (
+            <div>
+              <div className={caption}>Health path</div>
+              <input className={`${field} mt-1 font-mono`} value={form.healthPath} onChange={(e) => setForm({ ...form, healthPath: e.target.value })} />
+            </div>
+          ) : null}
+          {project.kind !== 'worker' ? (
           <div className="sm:col-span-2">
             <div className={caption}>Custom domain (optional)</div>
             <input
@@ -807,6 +1300,55 @@ function SettingsTab({
             <p className="mt-1 text-[10px] leading-relaxed text-zinc-600">
               Point a proxied CNAME at the Cloudflare tunnel. The wildcard record is not used for custom domains.
             </p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={createDomain.isPending || !form.customHostname.trim()}
+                onClick={() => createDomain.mutate()}
+              >
+                {createDomain.isPending ? <Spinner className="h-3 w-3" /> : <Globe size={12} />} Create DNS in Cloudflare
+              </Button>
+              {createDomain.isSuccess ? (
+                <span className="text-[10px] text-emerald-300">{createDomain.data.result}</span>
+              ) : null}
+              {createDomain.isError ? (
+                <span className="text-[10px] text-red-400">{String(createDomain.error)}</span>
+              ) : null}
+            </div>
+          </div>
+          ) : null}
+          <div className="sm:col-span-2 border-t border-zinc-800/60 pt-3">
+            <div className={caption}>App basic auth</div>
+            <p className="mt-1 text-[10px] text-zinc-600">
+              Protect the public URL with HTTP Basic auth. Leave the password blank to keep the current one.
+            </p>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+              <div>
+                <div className={caption}>Username</div>
+                <input
+                  className={`${field} mt-1`}
+                  value={basicUser}
+                  onChange={(e) => setBasicUser(e.target.value)}
+                  placeholder="(disabled)"
+                />
+              </div>
+              <div>
+                <div className={caption}>New password</div>
+                <input
+                  type="password"
+                  className={`${field} mt-1`}
+                  value={basicPass}
+                  onChange={(e) => setBasicPass(e.target.value)}
+                  placeholder={project.basicAuth ? 'leave blank to keep' : 'at least 8 characters'}
+                />
+              </div>
+            </div>
+            <label className="mt-2 flex items-center gap-2 text-[10px] text-zinc-400">
+              <input type="checkbox" checked={clearBasic} onChange={(e) => setClearBasic(e.target.checked)} />
+              Remove basic auth
+            </label>
           </div>
           <div className="sm:col-span-2">
             <div className={caption}>Build command</div>
@@ -942,7 +1484,7 @@ function SettingsTab({
                     <DeployBadge status={pl.status} />
                   </div>
                   <div className="mt-1 font-mono text-[10px] text-zinc-500">
-                    port {pl.port} · pid {pl.pid || '—'} · {pl.desired}
+                    {pl.port ? `port ${pl.port}` : 'no port'} · pid {pl.pid || '—'} · {pl.desired}
                     {pl.drained ? ' · drained' : ''}
                     {!pl.online ? ' · offline' : ''}
                   </div>
@@ -955,6 +1497,10 @@ function SettingsTab({
             orphaned copies when a phone comes back.
           </p>
         </Card>
+        {!project.parentId && project.sourceType === 'git' ? (
+          <WebhookCard projectId={project.id} branch={project.branch} />
+        ) : null}
+        {project.kind !== 'stack' ? <SecretFilesCard projectId={project.id} /> : null}
         <Card className="border-red-900/40 p-4">
           <div className="text-[10px] font-medium tracking-widest text-red-400/80 uppercase">Danger zone</div>
           <p className="mt-1 text-[10px] leading-relaxed text-zinc-500">

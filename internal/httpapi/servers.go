@@ -134,6 +134,9 @@ func (s *Server) handleDeleteServer(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.hub.Kick(id)
+	if err := s.st.DeleteTasksForServer(id); err != nil {
+		s.log.Warn("delete server tasks", "server", id, "err", err)
+	}
 	if err := s.st.DeleteServer(id); err != nil {
 		apiErr(w, 500, err)
 		return

@@ -49,12 +49,15 @@ var viewerPaths = []*regexp.Regexp{
 	regexp.MustCompile(`^/projects$`),
 	regexp.MustCompile(`^/projects/[^/]+$`),
 	regexp.MustCompile(`^/projects/[^/]+/deployments$`),
+	regexp.MustCompile(`^/projects/[^/]+/metrics$`),
+	regexp.MustCompile(`^/projects/[^/]+/uptime$`),
 	regexp.MustCompile(`^/addons$`),
 	regexp.MustCompile(`^/addons/engines$`),
 	regexp.MustCompile(`^/services$`),
 	regexp.MustCompile(`^/services/engines$`),
 	regexp.MustCompile(`^/alerts$`),
 	regexp.MustCompile(`^/alerts/count$`),
+	regexp.MustCompile(`^/tasks$`),
 }
 
 func viewerPathAllowed(p string) bool {

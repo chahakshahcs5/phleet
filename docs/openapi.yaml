@@ -1,0 +1,158 @@
+openapi: 3.0.3
+info:
+  title: phleet API
+  version: 0.16.0
+  description: Control-plane API for the phleet personal PaaS.
+servers:
+  - url: http://127.0.0.1:8080/api
+security:
+  - bearer: []
+paths:
+  /me:
+    get:
+      summary: Current panel identity and version
+      responses: { "200": { description: OK } }
+  /servers:
+    get:
+      summary: List phones with latest metrics
+      responses: { "200": { description: OK } }
+  /servers/{id}/exec:
+    post:
+      summary: Run a command on one phone
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [command]
+              properties:
+                command: { type: string }
+                timeoutSec: { type: integer }
+      responses: { "200": { description: Output and exit code }, "409": { description: Phone offline } }
+  /servers/batch/exec:
+    post:
+      summary: Run a command on selected phones (empty list = all online)
+      responses: { "200": { description: Per-phone results } }
+  /servers/{id}/retire:
+    post:
+      summary: Stop workloads and remove a phone from the fleet
+      responses: { "200": { description: Retired } }
+  /projects:
+    get:
+      summary: List projects
+      responses: { "200": { description: OK } }
+    post:
+      summary: Create a project, stack, static site or worker
+      responses: { "201": { description: Created } }
+  /projects/{id}/deploy:
+    post:
+      summary: Deploy the branch, or a branch/tag/commit ref
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ref: { type: string }
+      responses: { "202": { description: Deployments queued } }
+  /projects/{id}/rollback:
+    post:
+      summary: Roll back to the previous release, or a named release on one phone
+      responses: { "200": { description: Rolled back } }
+  /projects/{id}/releases:
+    get:
+      summary: List kept releases on one phone
+      responses: { "200": { description: OK } }
+  /projects/{id}/logs:
+    get:
+      summary: Tail an app log
+      responses: { "200": { description: Log tail } }
+  /projects/{id}/logs/stream:
+    get:
+      summary: Live app log WebSocket
+      responses: { "101": { description: Upgraded } }
+  /projects/{id}/metrics:
+    get:
+      summary: Per-app CPU and RSS samples
+      responses: { "200": { description: Samples } }
+  /projects/{id}/requests:
+    get:
+      summary: Recent edge request logs
+      responses: { "200": { description: Requests } }
+  /projects/{id}/webhook/rotate:
+    post:
+      summary: Generate or rotate the Git webhook secret
+      responses: { "200": { description: Secret shown once } }
+  /projects/{id}/secrets/{name}:
+    put:
+      summary: Create or replace an encrypted secret file
+      responses: { "200": { description: Saved } }
+    delete:
+      summary: Delete a secret file
+      responses: { "200": { description: Deleted } }
+  /tasks:
+    get:
+      summary: List scheduled tasks
+      responses: { "200": { description: OK } }
+    post:
+      summary: Create a cron task
+      responses: { "201": { description: Created } }
+  /tasks/{id}/run:
+    post:
+      summary: Run a task now
+      responses: { "202": { description: Started } }
+  /addons:
+    get:
+      summary: List data services and addons
+      responses: { "200": { description: OK } }
+  /addons/{id}/backup:
+    post:
+      summary: Start an addon backup
+      responses: { "202": { description: Started } }
+  /addons/{id}/backups/{backupId}/verify:
+    post:
+      summary: Verify a backup without touching live data
+      responses: { "200": { description: Verified } }
+  /addons/{id}/drills:
+    post:
+      summary: Run a restore-readiness drill
+      responses: { "202": { description: Started } }
+  /addons/{id}/usage:
+    get:
+      summary: Current data size for an addon
+      responses: { "200": { description: Used and hint MB } }
+  /backup-remote:
+    get: { summary: Read the off-site backup config, responses: { "200": { description: OK } } }
+    put: { summary: Save the off-site backup config, responses: { "200": { description: OK } } }
+  /backup-remote/test:
+    post: { summary: Test the rclone target, responses: { "200": { description: OK } } }
+  /backup-remote/sync:
+    post: { summary: Upload existing backups, responses: { "202": { description: Queued } } }
+  /backup-drill:
+    get: { summary: Read the drill schedule, responses: { "200": { description: OK } } }
+    put: { summary: Save the drill schedule, responses: { "200": { description: OK } } }
+  /events:
+    get:
+      summary: Paginated audit log
+      responses: { "200": { description: OK } }
+  /events/export:
+    get:
+      summary: Export the audit log as CSV or JSON
+      parameters:
+        - { name: format, in: query, schema: { type: string, enum: [csv, json] } }
+      responses: { "200": { description: Export } }
+  /alert-rules:
+    get: { summary: Read alert thresholds, responses: { "200": { description: OK } } }
+    put: { summary: Save alert thresholds, responses: { "200": { description: OK } } }
+  /notify:
+    get: { summary: Read notification channels, responses: { "200": { description: OK } } }
+    put: { summary: Save notification channels, responses: { "200": { description: OK } } }
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer

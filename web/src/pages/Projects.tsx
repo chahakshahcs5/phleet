@@ -14,11 +14,15 @@ const input =
   'h-9 w-full rounded-lg border border-zinc-800 bg-zinc-950/70 px-3 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-emerald-400/40'
 const label = 'text-[10px] font-medium tracking-widest text-zinc-500 uppercase'
 
+type WorkloadKind = 'app' | 'static' | 'worker'
+
 type ServiceDraft = {
   name: string
   slug: string
+  kind: WorkloadKind
   buildCmd: string
   startCmd: string
+  staticDir: string
   healthPath: string
   envText: string
 }
@@ -26,8 +30,10 @@ type ServiceDraft = {
 const emptyService = (): ServiceDraft => ({
   name: '',
   slug: '',
+  kind: 'app',
   buildCmd: '',
   startCmd: '',
+  staticDir: '',
   healthPath: '/',
   envText: '',
 })
@@ -56,7 +62,9 @@ function NewProject({ onClose }: { onClose: () => void }) {
   const [replicas, setReplicas] = useState(1)
   const [buildCmd, setBuildCmd] = useState('')
   const [startCmd, setStartCmd] = useState('')
+  const [staticDir, setStaticDir] = useState('')
   const [healthPath, setHealthPath] = useState('/')
+  const [kind, setKind] = useState<WorkloadKind>('app')
   const [envText, setEnvText] = useState('')
   const [stackMode, setStackMode] = useState(false)
   const [services, setServices] = useState<ServiceDraft[]>([emptyService()])
@@ -82,11 +90,13 @@ function NewProject({ onClose }: { onClose: () => void }) {
       if (!id) {
         const res = await api.createProject({
           name,
+          kind: stackMode ? undefined : kind,
           repo: sourceType === 'git' ? repo : '',
           branch,
           buildCmd: stackMode ? '' : buildCmd,
-          startCmd: stackMode ? '' : startCmd,
-          healthPath: stackMode ? '/' : healthPath,
+          startCmd: stackMode || kind === 'static' ? '' : startCmd,
+          staticDir: stackMode || kind !== 'static' ? '' : staticDir.trim(),
+          healthPath: stackMode || kind !== 'app' ? '/' : healthPath,
           serverId: serverId || undefined,
           selector: stackMode || serverId ? undefined : selector.trim() || undefined,
           replicas: stackMode ? 1 : replicas,
@@ -97,9 +107,11 @@ function NewProject({ onClose }: { onClose: () => void }) {
             ? services.map((s) => ({
                 name: s.name.trim(),
                 slug: s.slug.trim(),
+                kind: s.kind,
                 buildCmd: s.buildCmd.trim(),
-                startCmd: s.startCmd.trim(),
-                healthPath: s.healthPath.trim() || '/',
+                startCmd: s.kind === 'static' ? '' : s.startCmd.trim(),
+                staticDir: s.kind === 'static' ? s.staticDir.trim() : '',
+                healthPath: s.kind === 'app' ? s.healthPath.trim() || '/' : '/',
                 env: parseEnv(s.envText),
               }))
             : undefined,
@@ -131,12 +143,14 @@ function NewProject({ onClose }: { onClose: () => void }) {
 
   const servicesReady =
     services.length > 0 &&
-    services.every((s) => !!s.name.trim() && !!s.startCmd.trim())
+    services.every((s) => !!s.name.trim() && (s.kind === 'static' || !!s.startCmd.trim()))
+  const workloadReady = stackMode || kind === 'static' || !!startCmd.trim()
   const ready =
     !!name.trim() &&
     (sourceType === 'git' ? !!repo.trim() : !!folderFiles && folderFiles.length > 0) &&
     (!stackMode || (!!serverId && servicesReady)) &&
-    (!dbEnabled || !!serverId)
+    workloadReady &&
+    (!dbEnabled || (!!serverId && kind !== 'static'))
 
   return (
     <div
@@ -198,6 +212,45 @@ function NewProject({ onClose }: { onClose: () => void }) {
               </button>
             </div>
           </div>
+          {!stackMode ? (
+            <div className="sm:col-span-2">
+              <div className={label}>Workload</div>
+              <div className="mt-1 grid grid-cols-3 gap-1.5">
+                {(
+                  [
+                    { id: 'app', label: 'Web app', hint: 'process + port + hostname' },
+                    { id: 'static', label: 'Static site', hint: 'agent serves files' },
+                    { id: 'worker', label: 'Worker', hint: 'no port, no hostname' },
+                  ] as const
+                ).map((w) => (
+                  <button
+                    key={w.id}
+                    type="button"
+                    disabled={!!createdId}
+                    onClick={() => {
+                      setKind(w.id)
+                      if (w.id === 'static') setDbEnabled(false)
+                    }}
+                    title={w.hint}
+                    className={`h-8 rounded-lg border text-xs transition-colors ${
+                      kind === w.id
+                        ? 'border-emerald-400/50 bg-emerald-400/10 text-emerald-300'
+                        : 'border-zinc-800 bg-zinc-950/70 text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {w.label}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-1 text-[10px] leading-relaxed text-zinc-600">
+                {kind === 'static'
+                  ? 'The phone serves the release directory directly. Set a build command to produce a dist folder, then point the static directory at it.'
+                  : kind === 'worker'
+                    ? 'A worker runs as a supervised process with no port or hostname. Use it for queue consumers, cron-like work and background jobs.'
+                    : 'A single supervised process behind a hostname and health check.'}
+              </p>
+            </div>
+          ) : null}
           <div className="sm:col-span-2">
             <div className={label}>Source</div>
             <div className="mt-1 grid grid-cols-2 gap-1.5">
@@ -278,6 +331,7 @@ function NewProject({ onClose }: { onClose: () => void }) {
             ) : null}
           </div>
 
+          {!stackMode && kind === 'static' ? null : (
           <div className="sm:col-span-2 rounded-lg border border-zinc-800/80 bg-zinc-900/30 p-3">
             <label className="flex cursor-pointer items-start gap-2">
               <input
@@ -324,6 +378,7 @@ function NewProject({ onClose }: { onClose: () => void }) {
               </div>
             ) : null}
           </div>
+          )}
 
           {!stackMode ? (
             <>
@@ -348,14 +403,28 @@ function NewProject({ onClose }: { onClose: () => void }) {
                   disabled={!!serverId}
                 />
               </div>
-              <div>
-                <div className={label}>Start command</div>
-                <input className={`${input} mt-1 font-mono`} value={startCmd} onChange={(e) => setStartCmd(e.target.value)} placeholder="node server.js" />
-              </div>
-              <div>
-                <div className={label}>Health path</div>
-                <input className={`${input} mt-1 font-mono`} value={healthPath} onChange={(e) => setHealthPath(e.target.value)} placeholder="/" />
-              </div>
+              {kind === 'static' ? (
+                <div>
+                  <div className={label}>Static directory</div>
+                  <input
+                    className={`${input} mt-1 font-mono`}
+                    value={staticDir}
+                    onChange={(e) => setStaticDir(e.target.value)}
+                    placeholder="dist (blank = repository root)"
+                  />
+                </div>
+              ) : (
+                <div>
+                  <div className={label}>Start command</div>
+                  <input className={`${input} mt-1 font-mono`} value={startCmd} onChange={(e) => setStartCmd(e.target.value)} placeholder="node server.js" />
+                </div>
+              )}
+              {kind === 'app' ? (
+                <div>
+                  <div className={label}>Health path</div>
+                  <input className={`${input} mt-1 font-mono`} value={healthPath} onChange={(e) => setHealthPath(e.target.value)} placeholder="/" />
+                </div>
+              ) : null}
               <div className="sm:col-span-2">
                 <div className={label}>Build command (optional)</div>
                 <input className={`${input} mt-1 font-mono`} value={buildCmd} onChange={(e) => setBuildCmd(e.target.value)} placeholder="npm ci --include=dev && npm run build" />
@@ -400,19 +469,34 @@ function NewProject({ onClose }: { onClose: () => void }) {
                         />
                       </div>
                       <div>
-                        <div className={label}>Subdomain</div>
-                        <input
-                          className={`${input} mt-1 font-mono`}
-                          value={svc.slug}
+                        <div className={label}>Kind</div>
+                        <select
+                          className={`${input} mt-1`}
+                          value={svc.kind}
                           disabled={!!createdId}
-                          onChange={(e) => updateService(i, { slug: e.target.value })}
-                          placeholder={
-                            i === 0
-                              ? draftSlug(name) || 'app'
-                              : `${draftSlug(name) || 'app'}-${draftSlug(svc.name) || 'service'}`
-                          }
-                        />
+                          onChange={(e) => updateService(i, { kind: e.target.value as WorkloadKind })}
+                        >
+                          <option value="app">Web app</option>
+                          <option value="static">Static site</option>
+                          <option value="worker">Worker</option>
+                        </select>
                       </div>
+                      {svc.kind !== 'worker' ? (
+                        <div className="sm:col-span-2">
+                          <div className={label}>Subdomain</div>
+                          <input
+                            className={`${input} mt-1 font-mono`}
+                            value={svc.slug}
+                            disabled={!!createdId}
+                            onChange={(e) => updateService(i, { slug: e.target.value })}
+                            placeholder={
+                              i === 0
+                                ? draftSlug(name) || 'app'
+                                : `${draftSlug(name) || 'app'}-${draftSlug(svc.name) || 'service'}`
+                            }
+                          />
+                        </div>
+                      ) : null}
                       <div className="sm:col-span-2">
                         <div className={label}>Build command (optional)</div>
                         <input
@@ -423,26 +507,41 @@ function NewProject({ onClose }: { onClose: () => void }) {
                           placeholder="npm ci --include=dev && npm run build"
                         />
                       </div>
-                      <div className="sm:col-span-2">
-                        <div className={label}>Start command</div>
-                        <input
-                          className={`${input} mt-1 font-mono`}
-                          value={svc.startCmd}
-                          disabled={!!createdId}
-                          onChange={(e) => updateService(i, { startCmd: e.target.value })}
-                          placeholder="node server.js"
-                        />
-                      </div>
-                      <div>
-                        <div className={label}>Health path</div>
-                        <input
-                          className={`${input} mt-1 font-mono`}
-                          value={svc.healthPath}
-                          disabled={!!createdId}
-                          onChange={(e) => updateService(i, { healthPath: e.target.value })}
-                          placeholder="/"
-                        />
-                      </div>
+                      {svc.kind === 'static' ? (
+                        <div className="sm:col-span-2">
+                          <div className={label}>Static directory</div>
+                          <input
+                            className={`${input} mt-1 font-mono`}
+                            value={svc.staticDir}
+                            disabled={!!createdId}
+                            onChange={(e) => updateService(i, { staticDir: e.target.value })}
+                            placeholder="dist (blank = repository root)"
+                          />
+                        </div>
+                      ) : (
+                        <div className="sm:col-span-2">
+                          <div className={label}>Start command</div>
+                          <input
+                            className={`${input} mt-1 font-mono`}
+                            value={svc.startCmd}
+                            disabled={!!createdId}
+                            onChange={(e) => updateService(i, { startCmd: e.target.value })}
+                            placeholder="node server.js"
+                          />
+                        </div>
+                      )}
+                      {svc.kind === 'app' ? (
+                        <div>
+                          <div className={label}>Health path</div>
+                          <input
+                            className={`${input} mt-1 font-mono`}
+                            value={svc.healthPath}
+                            disabled={!!createdId}
+                            onChange={(e) => updateService(i, { healthPath: e.target.value })}
+                            placeholder="/"
+                          />
+                        </div>
+                      ) : null}
                       <div>
                         <div className={label}>Service env (optional)</div>
                         <textarea
@@ -458,8 +557,9 @@ function NewProject({ onClose }: { onClose: () => void }) {
                 ))}
               </div>
               <p className="mt-1 text-[10px] leading-relaxed text-zinc-600">
-                Each service gets its own subdomain, port and process. Leave the subdomain blank to use the stack
-                slug for the first service and <span className="font-mono">stack-name</span> for the rest.
+                Each web app gets its own subdomain, port and process. Static sites are served from the
+                release directory; workers run without a port. Pinned services reach each other over
+                localhost.
               </p>
             </div>
           )}
@@ -534,7 +634,7 @@ function ProjectCard({ project }: { project: ProjectView }) {
   const primary = primaryService(project)
   const allPlacements = isStack ? services.flatMap((s) => s.placements) : project.placements
   const serverNames = [...new Set(allPlacements.map((p) => p.serverName || p.serverId))].join(', ')
-  const ports = allPlacements.map((p) => p.port).filter(Boolean)
+  const ports = allPlacements.map((p) => p.port).filter((p) => p > 0)
   const latestAt = isStack
     ? services.reduce((best, s) => Math.max(best, s.latest?.startedAt ?? 0), 0)
     : project.latest?.startedAt ?? 0
@@ -552,18 +652,30 @@ function ProjectCard({ project }: { project: ProjectView }) {
               <Badge tone="info" className="shrink-0">
                 stack · {services.length}
               </Badge>
+            ) : project.kind === 'static' ? (
+              <Badge tone="info" className="shrink-0">
+                static
+              </Badge>
+            ) : project.kind === 'worker' ? (
+              <Badge className="shrink-0">worker</Badge>
             ) : null}
           </div>
-          <a
-            href={primary?.url || project.url}
-            target="_blank"
-            rel="noreferrer"
-            title={`Open ${primary?.hostname || project.hostname}`}
-            className="mt-0.5 flex min-w-0 items-center gap-1 font-mono text-[10px] text-zinc-500 hover:text-emerald-300 hover:underline"
-          >
-            <Globe size={10} className="shrink-0" />
-            <span className="truncate">{primary?.hostname || project.hostname}</span>
-          </a>
+          {primary?.hostname || project.hostname ? (
+            <a
+              href={primary?.url || project.url}
+              target="_blank"
+              rel="noreferrer"
+              title={`Open ${primary?.hostname || project.hostname}`}
+              className="mt-0.5 flex min-w-0 items-center gap-1 font-mono text-[10px] text-zinc-500 hover:text-emerald-300 hover:underline"
+            >
+              <Globe size={10} className="shrink-0" />
+              <span className="truncate">{primary?.hostname || project.hostname}</span>
+            </a>
+          ) : (
+            <div className="mt-0.5 flex min-w-0 items-center gap-1 font-mono text-[10px] text-zinc-600">
+              <Server size={10} className="shrink-0" /> no public URL
+            </div>
+          )}
         </div>
         <DeployBadge status={status} />
       </div>
@@ -582,7 +694,7 @@ function ProjectCard({ project }: { project: ProjectView }) {
           </span>
         </span>
         <span className="truncate" title={ports.join(', ')}>
-          ports {ports.length ? ports.join(', ') : '—'}
+          {ports.length ? `ports ${ports.join(', ')}` : project.kind === 'worker' ? 'no port' : 'ports —'}
         </span>
         <span className="col-span-2 truncate" title={latestAt ? time(latestAt) : ''}>
           deploy {latestAt ? ago(latestAt) : 'never'}

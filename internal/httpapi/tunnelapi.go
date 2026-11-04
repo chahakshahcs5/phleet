@@ -5,10 +5,12 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/hashicorp/yamux"
 
+	"phleet/internal/auth"
 	"phleet/internal/model"
 	"phleet/internal/store"
 	"phleet/internal/tunnel"
@@ -206,11 +208,22 @@ func (s *Server) proxyProject(w http.ResponseWriter, r *http.Request) bool {
 		}
 		return false
 	}
+	if project.BasicAuthUser != "" && project.BasicAuthHash != "" {
+		user, pass, ok := r.BasicAuth()
+		if !ok || !secureEq(user, project.BasicAuthUser) || !auth.VerifyPassword(pass, project.BasicAuthHash) {
+			s.recordRequest(project.ID, "", r, http.StatusUnauthorized, 0, time.Now())
+			w.Header().Set("WWW-Authenticate", `Basic realm="phleet"`)
+			http.Error(w, "authentication required", http.StatusUnauthorized)
+			return true
+		}
+	}
 	placements, err := s.st.ListProjectPlacements(project.ID)
 	if err != nil || len(placements) == 0 {
+		s.recordRequest(project.ID, "", r, http.StatusBadGateway, 0, time.Now())
 		http.Error(w, "no placement for this app", http.StatusBadGateway)
 		return true
 	}
+	started := time.Now()
 
 	type candidate struct {
 		port int
@@ -219,7 +232,7 @@ func (s *Server) proxyProject(w http.ResponseWriter, r *http.Request) bool {
 	healthy := []candidate{}
 	fallback := []candidate{}
 	for _, pl := range placements {
-		if pl.Desired == "stopped" {
+		if pl.Desired == "stopped" || pl.Port <= 0 {
 			continue
 		}
 		if srv, err := s.st.GetServer(pl.ServerID); err == nil && srv.Drain {
@@ -234,6 +247,7 @@ func (s *Server) proxyProject(w http.ResponseWriter, r *http.Request) bool {
 	}
 	candidates := append(healthy, fallback...)
 	if len(candidates) == 0 {
+		s.recordRequest(project.ID, "", r, http.StatusBadGateway, 0, started)
 		http.Error(w, "no healthy replica is reachable", http.StatusBadGateway)
 		return true
 	}
@@ -249,11 +263,28 @@ func (s *Server) proxyProject(w http.ResponseWriter, r *http.Request) bool {
 		if !ok {
 			continue
 		}
-		if err := tunnel.ProxyHTTP(w, r, sess, c.port, "phleet_session"); err != nil {
+		upgrade := websocketUpgrade(r)
+		out := w
+		var rec *responseRecorder
+		if !upgrade {
+			rec = &responseRecorder{ResponseWriter: w}
+			out = rec
+		}
+		started := time.Now()
+		err := tunnel.ProxyHTTP(out, r, sess, c.port, "phleet_session")
+		if !upgrade {
+			status, n := 0, int64(0)
+			if rec != nil {
+				status, n = rec.status, rec.bytes
+			}
+			s.recordRequest(project.ID, c.srv, r, status, n, started)
+		}
+		if err != nil {
 			s.log.Warn("proxy failed", "project", project.Slug, "server", c.srv, "err", err)
 		}
 		return true
 	}
+	s.recordRequest(project.ID, "", r, http.StatusBadGateway, 0, started)
 	http.Error(w, "replica tunnels are not connected", http.StatusBadGateway)
 	return true
 }

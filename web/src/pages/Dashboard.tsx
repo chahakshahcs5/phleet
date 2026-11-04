@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   Activity,
   BatteryCharging,
@@ -8,16 +8,19 @@ import {
   Globe,
   HardDrive,
   MemoryStick,
+  Play,
   Plus,
+  RefreshCw,
   Smartphone,
   Thermometer,
   Wifi,
 } from 'lucide-react'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api'
-import type { Server } from '../types'
+import type { FleetResult, Server } from '../types'
 import { ago, bytes, pct, temp, uptime } from '../lib/format'
-import { Badge, Card, EmptyState, Sparkline, StatusDot, cn } from '../components/ui'
+import { Badge, Button, Card, EmptyState, Sparkline, Spinner, StatusDot, cn } from '../components/ui'
 
 function tempTone(t: number): 'emerald' | 'amber' | 'red' {
   if (t >= 60) return 'red'
@@ -141,6 +144,90 @@ function ServerCard({ server }: { server: Server }) {
         </span>
       </div>
     </Link>
+  )
+}
+
+function FleetTools({ servers }: { servers: Server[] }) {
+  const [selected, setSelected] = useState<string[]>([])
+  const [command, setCommand] = useState('')
+  const [results, setResults] = useState<FleetResult[]>([])
+  const exec = useMutation({
+    mutationFn: () => api.batchExec(selected, command, 60),
+    onSuccess: (res) => setResults(res.results),
+  })
+  const update = useMutation({
+    mutationFn: () => api.updateAllAgents(),
+    onSuccess: (res) => setResults(res.results),
+  })
+  const online = servers.filter((s) => s.online)
+  const toggle = (id: string) => {
+    setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+  }
+  return (
+    <Card className="mt-4 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-[10px] font-medium tracking-widest text-zinc-500 uppercase">Fleet commands</div>
+        <span className="text-[10px] text-zinc-600">no selection runs on every online phone</span>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {online.map((s) => (
+          <button
+            key={s.id}
+            type="button"
+            onClick={() => toggle(s.id)}
+            className={cn(
+              'rounded-md border px-2 py-1 text-[10px] transition-colors',
+              selected.includes(s.id)
+                ? 'border-emerald-400/50 bg-emerald-400/10 text-emerald-300'
+                : 'border-zinc-800 bg-zinc-950/70 text-zinc-400 hover:text-zinc-200',
+            )}
+          >
+            {s.name}
+          </button>
+        ))}
+        {online.length === 0 ? <span className="text-[10px] text-zinc-600">no phone is online</span> : null}
+      </div>
+      <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+        <input
+          className="h-9 min-w-0 flex-1 rounded-lg border border-zinc-800 bg-zinc-950/70 px-3 font-mono text-[11px] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-emerald-400/40"
+          value={command}
+          onChange={(e) => setCommand(e.target.value)}
+          placeholder="uptime && df -h"
+        />
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={!command.trim() || exec.isPending}
+            onClick={() => exec.mutate()}
+          >
+            {exec.isPending ? <Spinner className="h-3 w-3" /> : <Play size={12} />} Run
+          </Button>
+          <Button size="sm" variant="outline" disabled={update.isPending || online.length === 0} onClick={() => update.mutate()}>
+            {update.isPending ? <Spinner className="h-3 w-3" /> : <RefreshCw size={12} />} Update agents
+          </Button>
+        </div>
+      </div>
+      {results.length > 0 ? (
+        <div className="mt-3 max-h-56 space-y-1.5 overflow-y-auto">
+          {results.map((r) => (
+            <div key={r.serverId} className="rounded-md bg-zinc-950/60 p-2">
+              <div className="flex items-center justify-between text-[10px]">
+                <span className="text-zinc-300">{r.name || r.serverId.slice(0, 8)}</span>
+                <Badge tone={r.ok ? 'good' : 'bad'}>{r.ok ? 'ok' : r.error || `exit ${r.exitCode}`}</Badge>
+              </div>
+              {r.output ? (
+                <pre className="mt-1 max-h-24 overflow-auto font-mono text-[10px] whitespace-pre-wrap text-zinc-500">
+                  {r.output}
+                </pre>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {exec.isError ? <div className="mt-2 text-[10px] text-red-400">{String(exec.error)}</div> : null}
+      {update.isError ? <div className="mt-2 text-[10px] text-red-400">{String(update.error)}</div> : null}
+    </Card>
   )
 }
 
@@ -269,6 +356,7 @@ export default function Dashboard() {
               ))}
             </div>
           )}
+          <FleetTools servers={list} />
         </section>
 
         <aside>

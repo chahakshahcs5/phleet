@@ -174,6 +174,7 @@ export interface Project {
   runtime: string
   buildCmd: string
   startCmd: string
+  staticDir?: string
   healthPath: string
   hostname: string
   customHostname?: string
@@ -183,6 +184,7 @@ export interface Project {
   sourceType: string
   sourceSize: number
   sourceUpdatedAt: number
+  basicAuthUser?: string
   parentId?: string
   kind?: string
   stackOrder?: number
@@ -196,6 +198,8 @@ export interface ProjectView extends Project {
   addons?: Addon[]
   latest?: Deployment
   url: string
+  webhook?: boolean
+  basicAuth?: boolean
 }
 
 export interface EngineInfo {
@@ -262,9 +266,61 @@ export interface Backup {
   kind: string
   status: string
   size: number
+  checksum?: string
+  encrypted?: boolean
+  remoteStatus?: string
+  remoteKey?: string
+  remoteError?: string
+  remoteAt?: number
   error?: string
   createdAt: number
   finishedAt: number
+}
+
+export interface RestoreDrill {
+  id: string
+  addonId: string
+  backupId: string
+  status: string
+  detail?: string
+  startedAt: number
+  finishedAt: number
+}
+
+export interface BackupRemoteConfig {
+  enabled: boolean
+  target: string
+  rclonePath: string
+}
+
+export interface BackupDrillConfig {
+  enabled: boolean
+  intervalHours: number
+  lastRun: number
+  lastStatus: string
+  lastDetail: string
+}
+
+export interface UptimeStatus {
+  projectId: string
+  checkedAt: number
+  ok: boolean
+  statusCode: number
+  error?: string
+}
+
+export interface ProjectSecret {
+  name: string
+  updatedAt: number
+}
+
+export interface FleetResult {
+  serverId: string
+  name?: string
+  ok: boolean
+  output?: string
+  exitCode?: number
+  error?: string
 }
 
 export interface Addon {
@@ -333,8 +389,10 @@ export interface AddonLog {
 export interface ServiceInput {
   name: string
   slug: string
+  kind?: string
   buildCmd: string
   startCmd: string
+  staticDir?: string
   healthPath: string
   env?: Record<string, string>
 }
@@ -382,6 +440,21 @@ export interface NotifyConfig {
   telegramToken: string
   telegramChat: string
   webhookUrl: string
+  ntfyUrl: string
+  gotifyUrl: string
+  gotifyToken: string
+  discordUrl: string
+  slackUrl: string
+  smtpHost: string
+  smtpPort: number
+  smtpUser: string
+  smtpPass: string
+  emailFrom: string
+  emailTo: string
+  quietHours: boolean
+  quietStart: number
+  quietEnd: number
+  maintenanceUntil: number
 }
 
 export interface DeployResult {
@@ -444,4 +517,68 @@ export interface Job {
   error?: string
   createdAt: number
   updatedAt: number
+}
+
+export interface Task {
+  id: string
+  name: string
+  serverId: string
+  projectId?: string
+  command: string
+  cron: string
+  timeoutSec: number
+  enabled: boolean
+  lastRun: number
+  lastStatus: string
+  lastExit: number
+  lastError: string
+  lastOutput?: string
+  createdAt: number
+  updatedAt: number
+  nextRun: number
+  serverName?: string
+  projectName?: string
+  available: boolean
+}
+
+export interface TaskLogs {
+  taskId: string
+  path: string
+  size: number
+  truncated: boolean
+  logs: string
+}
+
+export interface AppSample {
+  ts: number
+  cpuPercent: number
+  rss: number
+}
+
+export interface RequestLogItem {
+  id: number
+  projectId: string
+  serverId: string
+  ts: number
+  method: string
+  path: string
+  status: number
+  bytes: number
+  durationMs: number
+  host: string
+  ip: string
+}
+
+export interface AppRelease {
+  name: string
+  path: string
+  current: boolean
+  modifiedAt: number
+}
+
+export interface WebhookInfo {
+  configured: boolean
+  githubUrl: string
+  gitlabUrl: string
+  secret?: string
 }

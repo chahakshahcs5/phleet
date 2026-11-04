@@ -18,6 +18,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api } from '../api'
 import { ConfirmDialog } from '../components/Dialog'
 import { Badge, Button, Card, DeployBadge, EmptyState, Spinner } from '../components/ui'
+import WebhookCard from '../components/WebhookCard'
 import { ago } from '../lib/format'
 import { aggregateStatus } from '../lib/projects'
 import type { ProjectView } from '../types'
@@ -25,10 +26,11 @@ import type { ProjectView } from '../types'
 function ServiceCard({ service }: { service: ProjectView }) {
   const placements = service.placements
   const serverNames = [...new Set(placements.map((p) => p.serverName || p.serverId))].join(', ')
-  const ports = placements.map((p) => p.port).filter(Boolean)
+  const ports = placements.map((p) => p.port).filter((p) => p > 0)
   const pids = placements.map((p) => p.pid).filter(Boolean)
   const restarts = placements.reduce((n, p) => n + p.restarts, 0)
   const lastError = placements.map((p) => p.lastError).find(Boolean)
+  const kind = service.kind ?? 'app'
 
   return (
     <Card className="flex flex-col p-4">
@@ -37,18 +39,25 @@ function ServiceCard({ service }: { service: ProjectView }) {
           <div className="flex flex-wrap items-center gap-2">
             <span className="truncate text-sm font-medium text-zinc-100">{service.name}</span>
             <Badge>{service.slug}</Badge>
+            {kind !== 'app' ? <Badge tone="info">{kind}</Badge> : null}
           </div>
-          <a
-            href={service.url}
-            target="_blank"
-            rel="noreferrer"
-            title={service.hostname}
-            className="mt-0.5 flex min-w-0 items-center gap-1 font-mono text-[10px] text-zinc-500 hover:text-emerald-300"
-          >
-            <Globe size={10} className="shrink-0" />
-            <span className="truncate">{service.hostname}</span>
-            <ExternalLink size={9} className="shrink-0" />
-          </a>
+          {service.hostname ? (
+            <a
+              href={service.url}
+              target="_blank"
+              rel="noreferrer"
+              title={service.hostname}
+              className="mt-0.5 flex min-w-0 items-center gap-1 font-mono text-[10px] text-zinc-500 hover:text-emerald-300"
+            >
+              <Globe size={10} className="shrink-0" />
+              <span className="truncate">{service.hostname}</span>
+              <ExternalLink size={9} className="shrink-0" />
+            </a>
+          ) : (
+            <div className="mt-0.5 flex min-w-0 items-center gap-1 font-mono text-[10px] text-zinc-600">
+              <Server size={10} className="shrink-0" /> no public URL
+            </div>
+          )}
         </div>
         <DeployBadge status={aggregateStatus(service)} />
       </div>
@@ -58,7 +67,7 @@ function ServiceCard({ service }: { service: ProjectView }) {
           <Smartphone size={10} /> {serverNames || 'not placed'}
         </span>
         <span className="flex items-center gap-1 truncate">
-          <Server size={10} /> port {ports.length ? ports.join(', ') : '—'}
+          <Server size={10} /> {ports.length ? `port ${ports.join(', ')}` : 'no port'}
         </span>
         <span className="truncate">pid {pids.length ? pids.join(', ') : '—'}</span>
         <span className="truncate">restarts {restarts}</span>
@@ -74,7 +83,9 @@ function ServiceCard({ service }: { service: ProjectView }) {
       ) : null}
 
       <div className="mt-3 flex items-center justify-between border-t border-zinc-800/70 pt-2.5">
-        <span className="text-[10px] text-zinc-600">{service.healthPath || '/'}</span>
+        <span className="text-[10px] text-zinc-600">
+          {kind === 'static' ? 'static files' : kind === 'worker' ? 'worker (no port)' : service.healthPath || '/'}
+        </span>
         <Link
           to={`/projects/${service.id}`}
           className="inline-flex items-center gap-1 text-[10px] text-zinc-400 hover:text-zinc-100"
@@ -170,17 +181,23 @@ export default function StackDetail() {
             <DeployBadge status={aggregateStatus(project)} />
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-500">
-            <a
-              href={primary?.url || project.url}
-              target="_blank"
-              rel="noreferrer"
-              title={primary?.hostname || project.hostname}
-              className="inline-flex min-w-0 items-center gap-1 font-mono hover:text-emerald-300"
-            >
-              <Globe size={10} className="shrink-0" />
-              <span className="truncate">{primary?.hostname || project.hostname || 'no hostname'}</span>
-              <ExternalLink size={9} className="shrink-0" />
-            </a>
+            {primary?.hostname || project.hostname ? (
+              <a
+                href={primary?.url || project.url}
+                target="_blank"
+                rel="noreferrer"
+                title={primary?.hostname || project.hostname}
+                className="inline-flex min-w-0 items-center gap-1 font-mono hover:text-emerald-300"
+              >
+                <Globe size={10} className="shrink-0" />
+                <span className="truncate">{primary?.hostname || project.hostname}</span>
+                <ExternalLink size={9} className="shrink-0" />
+              </a>
+            ) : (
+              <span className="inline-flex items-center gap-1 font-mono text-zinc-600">
+                <Server size={10} className="shrink-0" /> no public URL
+              </span>
+            )}
             <span>{services.length} services · one phone</span>
             <span className="font-mono">{project.branch || 'main'}</span>
           </div>
@@ -241,9 +258,9 @@ export default function StackDetail() {
       <Card className="mt-5 p-4">
         <div className="text-[10px] font-medium tracking-widest text-zinc-500 uppercase">Stack notes</div>
         <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
-          Each service is a normal phleet project underneath: it has its own release, process, port, health check and
-          logs. Open a service to edit its commands, environment or view logs. The stack shares the repository, branch
-          and encrypted environment; per-service values win at deploy time.
+          Each service is a normal phleet project underneath: it has its own release, process, port (unless it
+          is a worker), health check and logs. Open a service to edit its commands, environment or view logs.
+          The stack shares the repository, branch and encrypted environment; per-service values win at deploy time.
         </p>
         {Object.keys(project.env ?? {}).length > 0 ? (
           <div className="mt-3 flex flex-wrap gap-1.5">
@@ -277,6 +294,12 @@ export default function StackDetail() {
           </div>
         ) : null}
       </Card>
+
+      {project.sourceType === 'git' ? (
+        <div className="mt-5">
+          <WebhookCard projectId={project.id} branch={project.branch} />
+        </div>
+      ) : null}
 
       <ConfirmDialog
         open={deleteOpen}

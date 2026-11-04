@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -38,6 +39,12 @@ func main() {
 		os.Exit(printTokens(os.Args[2:]))
 	case "backup":
 		os.Exit(backupDB(os.Args[2:]))
+	case "deploy":
+		os.Exit(cliDeploy(os.Args[2:]))
+	case "logs":
+		os.Exit(cliLogs(os.Args[2:]))
+	case "exec":
+		os.Exit(cliExec(os.Args[2:]))
 	case "totp":
 		os.Exit(totpCommand(os.Args[2:]))
 	case "version", "-v", "--version":
@@ -58,6 +65,9 @@ func usage() {
   phleet servers [flags]       List registered phones.
   phleet token [-which admin|agent|both]
   phleet backup [-out FILE]    Write a consistent snapshot of phleet.db
+  phleet deploy -project ID [-ref REF] [-wait]
+  phleet logs -project ID [-server ID] [-bytes N]
+  phleet exec -server ID -command "..." [-timeout SEC]
   phleet totp -disable         Break-glass: remove the admin TOTP secret
 
 Flags:
@@ -481,6 +491,198 @@ func getJSON(url, token string, timeout time.Duration) (map[string]any, error) {
 
 func getInto(url, token string, out any) error {
 	return getIntoTimeout(url, token, 10*time.Second, out)
+}
+
+func controlPlaneBase(cfg *config.Config, local string) string {
+	if strings.TrimSpace(local) != "" {
+		return strings.TrimRight(local, "/")
+	}
+	if conf, err := cloudflare.LoadConfig(cfg.CloudflaredConfig()); err == nil && conf.LocalURL != "" {
+		return strings.TrimRight(conf.LocalURL, "/")
+	}
+	return "http://127.0.0.1:8080"
+}
+
+func postJSON(url, token string, body any, out any) (int, error) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if out != nil {
+		_ = json.NewDecoder(resp.Body).Decode(out)
+	}
+	if resp.StatusCode >= 300 {
+		return resp.StatusCode, fmt.Errorf("%s returned HTTP %d", url, resp.StatusCode)
+	}
+	return resp.StatusCode, nil
+}
+
+func cliDeploy(args []string) int {
+	fs := flag.NewFlagSet("deploy", flag.ExitOnError)
+	dataDir := fs.String("data", config.DefaultDataDir(), "data directory")
+	local := fs.String("local", "", "control plane URL")
+	project := fs.String("project", "", "project ID")
+	ref := fs.String("ref", "", "branch, tag or commit SHA (default: configured branch)")
+	wait := fs.Bool("wait", false, "wait for the deployment to finish")
+	_ = fs.Parse(args)
+	if strings.TrimSpace(*project) == "" {
+		fmt.Fprintln(os.Stderr, "error: -project is required")
+		return 2
+	}
+	cfg, err := config.Load(*dataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	base := controlPlaneBase(cfg, *local)
+	var res struct {
+		Deployments []struct {
+			ID       string `json:"id"`
+			ServerID string `json:"serverId"`
+			Status   string `json:"status"`
+		} `json:"deployments"`
+		Skipped []string `json:"skipped"`
+	}
+	body := map[string]any{}
+	if strings.TrimSpace(*ref) != "" {
+		body["ref"] = strings.TrimSpace(*ref)
+	}
+	if _, err := postJSON(base+"/api/projects/"+*project+"/deploy", cfg.AdminToken, body, &res); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	for _, d := range res.Deployments {
+		fmt.Printf("%s %s %s\n", d.ID, d.ServerID, d.Status)
+	}
+	if len(res.Skipped) > 0 {
+		fmt.Fprintf(os.Stderr, "skipped offline phones: %s\n", strings.Join(res.Skipped, ", "))
+	}
+	if !*wait || len(res.Deployments) == 0 {
+		return 0
+	}
+	deadline := time.Now().Add(20 * time.Minute)
+	for time.Now().Before(deadline) {
+		time.Sleep(5 * time.Second)
+		var list struct {
+			Deployments []struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+				Detail string `json:"detail"`
+			} `json:"deployments"`
+		}
+		if err := getInto(base+"/api/projects/"+*project+"/deployments", cfg.AdminToken, &list); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return 1
+		}
+		terminal, failed := 0, false
+		for _, d := range list.Deployments {
+			switch d.Status {
+			case "active":
+				terminal++
+			case "failed", "rolled_back":
+				terminal++
+				failed = true
+				if d.Detail != "" {
+					fmt.Fprintln(os.Stderr, d.Detail)
+				}
+			}
+		}
+		if terminal >= len(res.Deployments) {
+			if failed {
+				return 1
+			}
+			fmt.Println("deployment active")
+			return 0
+		}
+	}
+	fmt.Fprintln(os.Stderr, "timed out waiting for the deployment")
+	return 1
+}
+
+func cliLogs(args []string) int {
+	fs := flag.NewFlagSet("logs", flag.ExitOnError)
+	dataDir := fs.String("data", config.DefaultDataDir(), "data directory")
+	local := fs.String("local", "", "control plane URL")
+	project := fs.String("project", "", "project ID")
+	server := fs.String("server", "", "server ID")
+	size := fs.Int("bytes", 64<<10, "tail size")
+	_ = fs.Parse(args)
+	if strings.TrimSpace(*project) == "" {
+		fmt.Fprintln(os.Stderr, "error: -project is required")
+		return 2
+	}
+	cfg, err := config.Load(*dataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	base := controlPlaneBase(cfg, *local)
+	url := base + "/api/projects/" + *project + "/logs?bytes=" + fmt.Sprint(*size)
+	if strings.TrimSpace(*server) != "" {
+		url += "&serverId=" + *server
+	}
+	var res struct {
+		Logs string `json:"logs"`
+		Path string `json:"path"`
+	}
+	if err := getInto(url, cfg.AdminToken, &res); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	fmt.Print(res.Logs)
+	if !strings.HasSuffix(res.Logs, "\n") {
+		fmt.Println()
+	}
+	return 0
+}
+
+func cliExec(args []string) int {
+	fs := flag.NewFlagSet("exec", flag.ExitOnError)
+	dataDir := fs.String("data", config.DefaultDataDir(), "data directory")
+	local := fs.String("local", "", "control plane URL")
+	server := fs.String("server", "", "server ID")
+	command := fs.String("command", "", "shell command")
+	timeout := fs.Int("timeout", 30, "timeout in seconds")
+	_ = fs.Parse(args)
+	if strings.TrimSpace(*server) == "" || strings.TrimSpace(*command) == "" {
+		fmt.Fprintln(os.Stderr, "error: -server and -command are required")
+		return 2
+	}
+	cfg, err := config.Load(*dataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	base := controlPlaneBase(cfg, *local)
+	var res struct {
+		Output   string `json:"output"`
+		ExitCode int    `json:"exitCode"`
+	}
+	if _, err := postJSON(base+"/api/servers/"+*server+"/exec", cfg.AdminToken, map[string]any{
+		"command": *command, "timeoutSec": *timeout,
+	}, &res); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	fmt.Print(res.Output)
+	if !strings.HasSuffix(res.Output, "\n") {
+		fmt.Println()
+	}
+	if res.ExitCode < 0 || res.ExitCode > 255 {
+		return 1
+	}
+	return res.ExitCode
 }
 
 func getIntoTimeout(url, token string, timeout time.Duration, out any) error {

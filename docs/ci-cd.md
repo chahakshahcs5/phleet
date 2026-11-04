@@ -38,21 +38,51 @@ The latest deployment includes `status` (`queued`, `building`, `starting`,
 `health_check`, `active`, `rolled_back`, `failed`), `startedAt`, `finishedAt`,
 `release` and `commitSha` for git sources.
 
+## Deploy a commit, tag or branch
+
+Send a JSON body with `ref`:
+
+```bash
+curl -fsS -X POST \
+  "$PHLEET_URL/api/projects/$PHLEET_PROJECT_ID/deploy" \
+  -H "Authorization: Bearer $PHLEET_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"ref":"v1.2.3"}'
+```
+
+`ref` may be a branch, tag or commit SHA. The phone clones it shallowly and, for
+a commit that is not the branch tip, fetches that one commit. The deployment
+records the checkout SHA. A stack deploys every service at the same ref.
+
 Other lifecycle actions:
 
 ```bash
 POST /api/projects/{id}/restart
 POST /api/projects/{id}/stop
 POST /api/projects/{id}/start
-POST /api/projects/{id}/rollback
+POST /api/projects/{id}/rollback        # previous release, all replicas
+POST /api/projects/{id}/rollback        # {"serverId":"...","release":"..."}
 ```
+
+## Git webhooks
+
+Generate a secret under **Project → Settings → Webhooks** (or the stack’s
+webhook card). phleet shows:
+
+- GitHub: `POST /hooks/github/<project-id>` with `X-Hub-Signature-256`.
+- GitLab: `POST /hooks/gitlab/<project-id>` with `X-Gitlab-Token`.
+
+A push to the configured branch deploys the pushed commit. Other branches and
+non-push events are ignored with `202`. Rotate the secret from the same card;
+the old one stops working immediately.
 
 ## GitHub Actions
 
-This repository contains a ready-to-use
-[`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml). It runs on
-manual dispatch and on pushes to `main` when `PHLEET_PROJECT_ID` is configured
-as a repository variable.
+This repository includes a ready-to-copy example at
+[`examples/github-actions/deploy.yml`](../examples/github-actions/deploy.yml).
+Copy it into the repository of the project you are deploying, not into the
+phleet control-plane repository. It runs on manual dispatch, and on pushes to
+`main` once `PHLEET_PROJECT_ID` is configured as a repository variable.
 
 Store `PHLEET_URL` and `PHLEET_TOKEN` as repository secrets, and
 `PHLEET_PROJECT_ID` as a repository variable. The manual dispatch form also
@@ -127,14 +157,14 @@ Stacks share the parent branch across all services.
 If Cloudflare Access protects `fleet.example.com`, CI requests need an Access
 service token and the
 `CF-Access-Client-Id` / `CF-Access-Client-Secret` headers, or a bypass policy
-for the deployment API path. Keep `/agent` and `/agent/data` on their own
-bypass.
+for the deployment API path. Keep `/agent`, `/agent/data` and `/hooks/*` on
+their own bypass: Git providers cannot carry an Access session, and the webhook
+signature authenticates those paths.
 
 ## Notes
 
 - Deploys are built and run entirely on the phone; the CI runner only triggers
   and observes.
-- The deploy endpoint accepts the current project configuration. It does not
-  accept a commit or branch override today; set the branch on the project (or
-  use separate projects) before triggering.
+- The deploy endpoint accepts the current project configuration and an optional
+  `ref`. Without a ref it deploys the configured branch at trigger time.
 - Build logs are available at `GET /api/deployments/{id}` to admin tokens.

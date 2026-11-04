@@ -27,5 +27,6 @@ export function onlineReplicas(p: ProjectView): number {
 }
 
 export function primaryService(p: ProjectView): ProjectView | undefined {
-  return p.services && p.services.length > 0 ? p.services[0] : p
+  if (!p.services || p.services.length === 0) return p
+  return p.services.find((service) => service.hostname) ?? p.services[0]
 }

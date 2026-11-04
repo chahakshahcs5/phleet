@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	Version       = "0.10.1"
+	Version       = "0.16.0"
 	AdminFile     = "admin_token"
 	AgentFile     = "agent_token"
 	KeyFile       = "session.key"

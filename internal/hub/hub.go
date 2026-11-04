@@ -82,6 +82,7 @@ type Callbacks struct {
 	OnDisconnect  func(serverID string)
 	OnDeployEvent func(serverID string, ev agentproto.DeployEvent)
 	OnAddonEvent  func(serverID string, ev agentproto.AddonEvent)
+	OnTaskEvent   func(serverID string, ev agentproto.TaskEvent)
 }
 
 type Hub struct {
@@ -204,6 +205,11 @@ func (h *Hub) handle(c *Conn, env agentproto.Envelope) {
 		var ev agentproto.AddonEvent
 		if err := json.Unmarshal(env.Data, &ev); err == nil && h.callbacks.OnAddonEvent != nil {
 			h.callbacks.OnAddonEvent(c.ServerID, ev)
+		}
+	case env.Type == agentproto.TypeTaskEvent:
+		var ev agentproto.TaskEvent
+		if err := json.Unmarshal(env.Data, &ev); err == nil && h.callbacks.OnTaskEvent != nil {
+			h.callbacks.OnTaskEvent(c.ServerID, ev)
 		}
 	case env.ReplyTo != "":
 		c.reqMu.Lock()

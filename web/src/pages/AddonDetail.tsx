@@ -192,6 +192,26 @@ export default function AddonDetail() {
   const verify = useMutation({
     mutationFn: (backupId: string) => api.verifyAddonBackup(id, backupId),
   })
+  const usage = useQuery({
+    queryKey: ['addon-usage', id],
+    queryFn: () => api.addonUsage(id),
+    enabled: !!id && tab === 'overview' && online && !!addon?.dataDir,
+    refetchInterval: 60000,
+    retry: false,
+  })
+  const drills = useQuery({
+    queryKey: ['addon-drills', id],
+    queryFn: () => api.addonDrills(id),
+    enabled: !!id && (tab === 'backups' || tab === 'overview'),
+    refetchInterval: 15000,
+  })
+  const runDrill = useMutation({
+    mutationFn: () => api.runAddonDrill(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['addon-drills', id] })
+      qc.invalidateQueries({ queryKey: ['backup-drill'] })
+    },
+  })
   const run = useMutation({
     mutationFn: () => api.addonQuery(id, consoleInput),
     onSuccess: (res) => {
@@ -366,7 +386,20 @@ export default function AddonDetail() {
                 <KeyValue label="Data directory">
                   <span className="font-mono text-[10px]">{addon.dataDir || '—'}</span>
                 </KeyValue>
-                <KeyValue label="Size hint">{addon.sizeLimitMB ? `${addon.sizeLimitMB} MB (advisory)` : 'none'}</KeyValue>
+                <KeyValue label="Data usage">
+                  {usage.isSuccess ? (
+                    <span className={usage.data.over ? 'text-amber-300' : 'text-zinc-300'}>
+                      {usage.data.usedMb} MB
+                      {usage.data.limitMb > 0 ? ` / ${usage.data.limitMb} MB${usage.data.over ? ' · over limit' : ''}` : ''}
+                    </span>
+                  ) : usage.isLoading ? (
+                    'measuring…'
+                  ) : usage.isError ? (
+                    <span className="text-[10px] text-zinc-600">unavailable</span>
+                  ) : (
+                    '—'
+                  )}
+                </KeyValue>
                 <KeyValue label="Replication">
                   {addon.replicationMode === 'none' ? 'none — single copy' : addon.replicationMode}
                 </KeyValue>
@@ -640,7 +673,23 @@ export default function AddonDetail() {
           <Card className="overflow-hidden">
             <div className="flex items-center justify-between border-b border-zinc-800/70 px-4 py-2.5">
               <div className={label}>Backups</div>
-              <span className="text-[10px] text-zinc-600">stored on the control plane · last 10 kept</span>
+              <div className="flex flex-wrap items-center gap-2">
+                {drills.data?.latest ? (
+                  <Badge tone={drills.data.latest.status === 'failed' ? 'bad' : drills.data.latest.status === 'passed' ? 'good' : 'warn'}>
+                    drill {drills.data.latest.status}
+                  </Badge>
+                ) : null}
+                <span className="text-[10px] text-zinc-600">stored on the control plane · last 10 kept</span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={!lastBackup || lastBackup.status !== 'complete' || !online || runDrill.isPending}
+                  onClick={() => runDrill.mutate()}
+                  title="Verify the latest backup without touching live data"
+                >
+                  {runDrill.isPending ? <Spinner className="h-3 w-3" /> : <Play size={12} />} Run drill
+                </Button>
+              </div>
             </div>
             {backups.length === 0 ? (
               <div className="px-4 py-8 text-center text-[11px] text-zinc-600">
@@ -654,6 +703,7 @@ export default function AddonDetail() {
                       <th className="px-4 py-2 font-medium">created</th>
                       <th className="px-3 py-2 font-medium">status</th>
                       <th className="px-3 py-2 font-medium">size</th>
+                      <th className="px-3 py-2 font-medium">off-site</th>
                       <th className="px-3 py-2 font-medium">id</th>
                       <th className="px-4 py-2 font-medium"></th>
                     </tr>
@@ -666,6 +716,19 @@ export default function AddonDetail() {
                           <DeployBadge status={b.status === 'complete' ? 'active' : b.status} />
                         </td>
                         <td className="px-3 py-2 text-zinc-500">{bytes(b.size)}</td>
+                        <td className="px-3 py-2">
+                          {b.remoteStatus === 'uploaded' ? (
+                            <Badge tone="good">off-site</Badge>
+                          ) : b.remoteStatus === 'failed' ? (
+                            <span title={b.remoteError || ''}>
+                              <Badge tone="bad">failed</Badge>
+                            </span>
+                          ) : b.remoteStatus === 'uploading' ? (
+                            <Badge tone="warn">uploading</Badge>
+                          ) : (
+                            <span className="text-[10px] text-zinc-600">—</span>
+                          )}
+                        </td>
                         <td className="px-3 py-2 font-mono text-[10px] text-zinc-600">{b.id.slice(0, 8)}</td>
                         <td className="px-4 py-2 text-right">
                           <div className="flex justify-end gap-1">
@@ -701,6 +764,13 @@ export default function AddonDetail() {
             )}
             {verify.isSuccess ? <div className="px-4 pb-3 text-[11px] text-emerald-300">Backup verified.</div> : null}
             {verify.isError ? <div className="px-4 pb-3 text-[11px] text-red-400">{String(verify.error)}</div> : null}
+            {runDrill.isSuccess ? <div className="px-4 pb-3 text-[11px] text-emerald-300">Restore drill started.</div> : null}
+            {runDrill.isError ? <div className="px-4 pb-3 text-[11px] text-red-400">{String(runDrill.error)}</div> : null}
+            {drills.data?.latest?.detail ? (
+              <div className="px-4 pb-3 text-[10px] text-zinc-600">
+                last drill: {drills.data.latest.status} · {drills.data.latest.detail}
+              </div>
+            ) : null}
             {restore.isError ? <div className="px-4 pb-3 text-[11px] text-red-400">{String(restore.error)}</div> : null}
           </Card>
         ) : null}

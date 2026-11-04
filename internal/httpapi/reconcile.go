@@ -18,6 +18,11 @@ func (s *Server) StartBackground(ctx context.Context) {
 	go s.alertLoop(ctx)
 	go s.tunnel.Run(ctx)
 	go s.backupLoop(ctx)
+	go s.taskSyncLoop(ctx)
+	go s.requestLogLoop(ctx)
+	go s.drillLoop(ctx)
+	go s.uptimeLoop(ctx)
+	go s.quotaLoop(ctx)
 }
 
 func (s *Server) triggerReconcile() {
@@ -110,7 +115,7 @@ func (s *Server) reconcileProject(p model.Project) {
 	if allStopped {
 		return
 	}
-	if len(placements) == 0 && (p.Repo == "" || p.StartCmd == "") {
+	if len(placements) == 0 && !projectDeployable(p) {
 		return
 	}
 	if s.hasInflight(p.ID) {
@@ -205,28 +210,36 @@ func (s *Server) addReplicas(p model.Project, states []placement.Server, active 
 	}
 	deployed := 0
 	for _, serverID := range plan {
-		s.portMu.Lock()
-		port, err := s.allocatePort(serverID)
-		if err != nil {
-			s.portMu.Unlock()
-			s.log.Warn("reconcile: allocate port", "server", serverID, "err", err)
-			continue
+		port := 0
+		var err error
+		locked := p.Kind != "worker"
+		if locked {
+			s.portMu.Lock()
+			port, err = s.allocatePort(serverID)
+			if err != nil {
+				s.portMu.Unlock()
+				s.log.Warn("reconcile: allocate port", "server", serverID, "err", err)
+				continue
+			}
 		}
 		pl := model.Placement{
 			ProjectID: p.ID, ServerID: serverID, Port: port, Status: "pending", Desired: "running",
 			UpdatedAt: time.Now().Unix(),
 		}
 		err = s.st.UpsertPlacement(pl)
-		s.portMu.Unlock()
+		if locked {
+			s.portMu.Unlock()
+		}
 		if err != nil {
 			s.log.Warn("reconcile: add placement", "err", err)
 			continue
 		}
 		_ = s.st.AddEvent("scheduler", "placement.add", p.ID, p.Name+" → "+serverID)
-		if p.Repo == "" || p.StartCmd == "" {
+		go s.syncTasksForServer(serverID)
+		if !projectDeployable(p) {
 			continue
 		}
-		if _, err := s.startDeployment(p, pl); err != nil {
+		if _, err := s.startDeployment(p, pl, ""); err != nil {
 			s.log.Warn("reconcile: deploy replica", "project", p.Slug, "server", serverID, "err", err)
 			continue
 		}
@@ -252,6 +265,7 @@ func (s *Server) removePlacement(p model.Project, pl model.Placement) {
 		return
 	}
 	_ = s.st.AddEvent("scheduler", "placement.remove", p.ID, p.Name+" ← "+pl.ServerID)
+	go s.syncTasksForServer(pl.ServerID)
 }
 
 // handleRebalance lets the UI ask for an immediate reconciliation.

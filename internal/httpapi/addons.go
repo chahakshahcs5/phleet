@@ -951,6 +951,9 @@ func (s *Server) handleDeleteAddon(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 500, err)
 		return
 	}
+	for _, b := range bindings {
+		go s.syncTasksForProject(b.ProjectID)
+	}
 	writeJSON(w, 200, map[string]any{"ok": true, "purged": purge})
 }
 
@@ -979,6 +982,7 @@ func (s *Server) deleteAddon(ctx context.Context, a model.Addon, purge bool) err
 			if b.Path != "" {
 				_ = os.Remove(b.Path)
 			}
+			go s.deleteBackupRemote(b)
 		}
 	}
 	if err := s.st.DeleteAddon(a.ID); err != nil {
@@ -1541,6 +1545,7 @@ func (s *Server) handleBindAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.st.AddEvent("ui", "addon.bind", a.ID, p.Name)
+	go s.syncTasksForProject(p.ID)
 	writeJSON(w, 200, map[string]any{"addon": s.buildAddonView(a, true)})
 }
 
@@ -1555,6 +1560,7 @@ func (s *Server) handleUnbindAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.st.AddEvent("ui", "addon.unbind", a.ID, r.PathValue("projectId"))
+	go s.syncTasksForProject(r.PathValue("projectId"))
 	writeJSON(w, 200, map[string]any{"addon": s.buildAddonView(a, true)})
 }
 
@@ -1745,11 +1751,18 @@ func (s *Server) handleAddonBackupUpload(w http.ResponseWriter, r *http.Request)
 		_ = s.st.SetBackupChecksum(b.ID, checksum)
 	}
 	_ = s.st.SetBackupEncrypted(b.ID)
+	b.Path = dest
+	b.Size = info.Size()
+	b.Checksum = checksum
+	b.Encrypted = true
+	b.Status = "complete"
+	go s.uploadBackupToRemote(a, b, dest, checksum)
 	if removed, err := s.st.PruneBackups(a.ID, 10); err == nil {
 		for _, old := range removed {
 			if old.Path != "" && old.Path != dest {
 				_ = os.Remove(old.Path)
 			}
+			go s.deleteBackupRemote(old)
 		}
 	}
 	_ = s.st.AddEvent("agent", "addon.backup_complete", a.ID, fmt.Sprintf("%d bytes", info.Size()))
@@ -1767,28 +1780,11 @@ func (s *Server) handleVerifyBackup(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 404, errors.New("backup not found"))
 		return
 	}
-	if b.Status != "complete" || b.Path == "" {
+	if b.Status != "complete" {
 		apiErr(w, 409, errors.New("this backup is not complete"))
 		return
 	}
-	if !s.hub.Online(a.PinnedServer) {
-		apiErr(w, 409, errors.New("the phone hosting this database is offline"))
-		return
-	}
-	creds, err := s.decryptAddonCreds(a)
-	if err != nil {
-		apiErr(w, 500, err)
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Minute)
-	defer cancel()
-	_, err = s.hub.Call(ctx, a.PinnedServer, agentproto.TypeAddonVerify, agentproto.AddonVerifyRequest{
-		AddonID: a.ID, Slug: a.Slug, BackupID: b.ID, Engine: a.Engine,
-		DownloadPath: "/api/addons/" + a.ID + "/backups/" + b.ID + "/download",
-		Checksum:     b.Checksum,
-		Port:         a.Port, User: creds.User, Password: creds.Password, Database: creds.Database,
-	})
-	if err != nil {
+	if err := s.verifyBackup(r.Context(), a, b); err != nil {
 		apiErr(w, 409, err)
 		return
 	}
@@ -1803,7 +1799,7 @@ func (s *Server) handleAddonBackupDownload(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	b, err := s.st.GetBackup(r.PathValue("backupId"))
-	if err != nil || b.AddonID != a.ID || b.Path == "" {
+	if err != nil || b.AddonID != a.ID || b.Status != "complete" {
 		apiErr(w, 404, errors.New("backup not found"))
 		return
 	}
@@ -1811,7 +1807,12 @@ func (s *Server) handleAddonBackupDownload(w http.ResponseWriter, r *http.Reques
 		apiErr(w, http.StatusForbidden, errors.New("this phone does not host that addon"))
 		return
 	}
-	f, err := os.Open(b.Path)
+	localPath, err := s.ensureBackupLocal(r.Context(), a, b)
+	if err != nil {
+		apiErr(w, 404, err)
+		return
+	}
+	f, err := os.Open(localPath)
 	if err != nil {
 		apiErr(w, 404, errors.New("backup file is missing"))
 		return
@@ -1873,8 +1874,12 @@ func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 404, errors.New("backup not found"))
 		return
 	}
-	if b.Status != "complete" || b.Path == "" {
+	if b.Status != "complete" {
 		apiErr(w, 409, errors.New("this backup is not complete"))
+		return
+	}
+	if _, err := s.ensureBackupLocal(r.Context(), a, b); err != nil {
+		apiErr(w, 409, err)
 		return
 	}
 	if !s.hub.Online(a.PinnedServer) {

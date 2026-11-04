@@ -6,6 +6,7 @@ import {
   Blocks,
   Boxes,
   ChevronRight,
+  Clock,
   LayoutDashboard,
   LogOut,
   Palette,
@@ -99,6 +100,7 @@ export default function Layout() {
           <NavItem to="/projects" icon={<Boxes size={15} />} label="Projects" />
           <NavItem to="/services" icon={<AppWindow size={15} />} label="Services" />
           <NavItem to="/addons" icon={<Blocks size={15} />} label="Addons" />
+          <NavItem to="/tasks" icon={<Clock size={15} />} label="Tasks" />
           <NavItem to="/alerts" icon={<Bell size={15} />} label="Alerts" badge={alertCount.data?.count} />
           <NavItem to="/events" icon={<Activity size={15} />} label="Events" />
           <NavItem to="/settings" icon={<Settings size={15} />} label="Settings" />
@@ -195,6 +197,9 @@ export default function Layout() {
             </NavLink>
             <NavLink to="/addons" className="rounded-md p-2 text-zinc-400 aria-[current=page]:text-emerald-400">
               <Blocks size={16} />
+            </NavLink>
+            <NavLink to="/tasks" className="rounded-md p-2 text-zinc-400 aria-[current=page]:text-emerald-400">
+              <Clock size={16} />
             </NavLink>
             <NavLink to="/alerts" className="rounded-md p-2 text-zinc-400 aria-[current=page]:text-emerald-400">
               <Bell size={16} />

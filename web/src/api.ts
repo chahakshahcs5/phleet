@@ -6,7 +6,11 @@ import type {
   Alert,
   AlertRules,
   AppLogs,
+  AppRelease,
+  AppSample,
   Backup,
+  BackupDrillConfig,
+  BackupRemoteConfig,
   DeployResult,
   Deployment,
   DeploymentDetail,
@@ -14,6 +18,7 @@ import type {
   EventItem,
   EventsPage,
   ExecResult,
+  FleetResult,
   FSList,
   FSRead,
   Job,
@@ -23,12 +28,19 @@ import type {
   Proc,
   ProjectView,
   ProvisionResult,
+  ProjectSecret,
+  RequestLogItem,
+  RestoreDrill,
   Sample,
   Server,
   ServiceInput,
   SetupInfo,
+  Task,
+  TaskLogs,
   TunnelStatus,
+  UptimeStatus,
   User,
+  WebhookInfo,
 } from './types'
 
 export class ApiError extends Error {
@@ -83,6 +95,20 @@ export const api = {
     request<ExecResult>(`/api/servers/${id}/exec`, {
       method: 'POST',
       body: JSON.stringify({ command, timeoutSec }),
+    }),
+  batchExec: (serverIds: string[], command: string, timeoutSec = 60) =>
+    request<{ results: FleetResult[] }>('/api/servers/batch/exec', {
+      method: 'POST',
+      body: JSON.stringify({ serverIds, command, timeoutSec }),
+    }),
+  updateAgent: (id: string) =>
+    request<{ ok: boolean }>(`/api/servers/${id}/update`, { method: 'POST' }),
+  updateAllAgents: () =>
+    request<{ results: FleetResult[] }>('/api/servers/update', { method: 'POST' }),
+  retireServer: (id: string, purgeAddons = false) =>
+    request<{ ok: boolean }>(`/api/servers/${id}/retire`, {
+      method: 'POST',
+      body: JSON.stringify({ purgeAddons }),
     }),
   processes: (id: string) => request<{ processes: Proc[] }>(`/api/servers/${id}/processes`),
 
@@ -175,10 +201,12 @@ export const api = {
   project: (id: string) => request<{ project: ProjectView }>(`/api/projects/${id}`),
   createProject: (body: {
     name: string
+    kind?: string
     repo: string
     branch: string
     buildCmd: string
     startCmd: string
+    staticDir?: string
     healthPath: string
     customHostname?: string
     serverId?: string
@@ -195,7 +223,11 @@ export const api = {
     branch: string
     buildCmd: string
     startCmd: string
+    staticDir: string
     healthPath: string
+    basicAuthUser: string
+    basicAuthPassword: string
+    clearBasicAuth: boolean
     customHostname: string
     selector: string
     replicas: number
@@ -210,6 +242,11 @@ export const api = {
   },
   deployProject: (id: string) =>
     request<DeployResult>(`/api/projects/${id}/deploy`, { method: 'POST' }),
+  deployProjectRef: (id: string, ref: string) =>
+    request<DeployResult>(`/api/projects/${id}/deploy`, {
+      method: 'POST',
+      body: JSON.stringify({ ref }),
+    }),
   projectAction: (id: string, action: 'start' | 'stop' | 'restart' | 'rollback') =>
     request<{ ok: boolean; results: { serverId: string; ok: boolean; error?: string }[] }>(
       `/api/projects/${id}/${action}`,
@@ -219,6 +256,39 @@ export const api = {
   deployment: (id: string) => request<DeploymentDetail>(`/api/deployments/${id}`),
   appLogs: (id: string, serverId?: string) =>
     request<AppLogs>(`/api/projects/${id}/logs${serverId ? `?serverId=${encodeURIComponent(serverId)}` : ''}`),
+  projectMetrics: (id: string, minutes = 60) =>
+    request<{ samples: AppSample[]; bucketSec: number }>(`/api/projects/${id}/metrics?minutes=${minutes}`),
+  projectRequests: (id: string, limit = 200) =>
+    request<{ requests: RequestLogItem[] }>(`/api/projects/${id}/requests?limit=${limit}`),
+  projectUptime: (id: string) =>
+    request<{ uptime: UptimeStatus | null }>(`/api/projects/${id}/uptime`),
+  projectReleases: (id: string, serverId: string) =>
+    request<{ serverId: string; releases: AppRelease[] }>(
+      `/api/projects/${id}/releases?serverId=${encodeURIComponent(serverId)}`,
+    ),
+  rollbackRelease: (id: string, serverId: string, release: string) =>
+    request<{ ok: boolean }>(`/api/projects/${id}/rollback`, {
+      method: 'POST',
+      body: JSON.stringify({ serverId, release }),
+    }),
+  projectWebhook: (id: string) => request<WebhookInfo>(`/api/projects/${id}/webhook`),
+  rotateProjectWebhook: (id: string) =>
+    request<WebhookInfo>(`/api/projects/${id}/webhook/rotate`, { method: 'POST' }),
+  createCustomDomain: (id: string) =>
+    request<{ ok: boolean; result: string; hostname: string }>(
+      `/api/projects/${id}/domain/cloudflare`,
+      { method: 'POST' },
+    ),
+  projectSecrets: (id: string) => request<{ secrets: ProjectSecret[] }>(`/api/projects/${id}/secrets`),
+  putProjectSecret: (id: string, name: string, content: string) =>
+    request<{ ok: boolean }>(`/api/projects/${id}/secrets/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }),
+  deleteProjectSecret: (id: string, name: string) =>
+    request<{ ok: boolean }>(`/api/projects/${id}/secrets/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    }),
   rebalance: () => request<{ ok: boolean }>('/api/rebalance', { method: 'POST' }),
 
   addonEngines: () => request<{ engines: EngineInfo[] }>('/api/addons/engines'),
@@ -280,6 +350,28 @@ export const api = {
     request<{ backup: Backup }>(`/api/addons/${id}/backup`, { method: 'POST' }),
   verifyAddonBackup: (id: string, backupId: string) =>
     request<{ ok: boolean }>(`/api/addons/${id}/backups/${backupId}/verify`, { method: 'POST' }),
+  addonDrills: (id: string) =>
+    request<{ drills: RestoreDrill[]; latest?: RestoreDrill }>(`/api/addons/${id}/drills`),
+  runAddonDrill: (id: string) =>
+    request<{ drill: RestoreDrill }>(`/api/addons/${id}/drills`, { method: 'POST' }),
+  addonUsage: (id: string) =>
+    request<{ usedMb: number; limitMb: number; over: boolean }>(`/api/addons/${id}/usage`),
+  backupRemote: () => request<{ config: BackupRemoteConfig }>('/api/backup-remote'),
+  saveBackupRemote: (config: BackupRemoteConfig) =>
+    request<{ config: BackupRemoteConfig }>('/api/backup-remote', {
+      method: 'PUT',
+      body: JSON.stringify(config),
+    }),
+  testBackupRemote: () =>
+    request<{ ok: boolean; output?: string }>('/api/backup-remote/test', { method: 'POST' }),
+  syncBackupRemote: () =>
+    request<{ queued: number }>('/api/backup-remote/sync', { method: 'POST' }),
+  backupDrill: () => request<{ config: BackupDrillConfig }>('/api/backup-drill'),
+  saveBackupDrill: (config: BackupDrillConfig) =>
+    request<{ config: BackupDrillConfig }>('/api/backup-drill', {
+      method: 'PUT',
+      body: JSON.stringify(config),
+    }),
   restoreAddonBackup: (id: string, backupId: string) =>
     request<{ ok: boolean }>(`/api/addons/${id}/restore`, {
       method: 'POST',
@@ -329,6 +421,29 @@ export const api = {
   saveNotifyConfig: (cfg: NotifyConfig) =>
     request<{ ok: boolean }>('/api/notify', { method: 'PUT', body: JSON.stringify(cfg) }),
   testNotify: () => request<{ ok: boolean }>('/api/notify/test', { method: 'POST' }),
+
+  tasks: () => request<{ tasks: Task[] }>('/api/tasks'),
+  createTask: (body: {
+    name: string
+    serverId: string
+    projectId?: string
+    command: string
+    cron: string
+    timeoutSec?: number
+    enabled?: boolean
+  }) => request<{ task: Task }>('/api/tasks', { method: 'POST', body: JSON.stringify(body) }),
+  updateTask: (id: string, body: Partial<{
+    name: string
+    serverId: string
+    projectId: string
+    command: string
+    cron: string
+    timeoutSec: number
+    enabled: boolean
+  }>) => request<{ task: Task }>(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteTask: (id: string) => request<{ ok: boolean }>(`/api/tasks/${id}`, { method: 'DELETE' }),
+  runTask: (id: string) => request<{ ok: boolean }>(`/api/tasks/${id}/run`, { method: 'POST' }),
+  taskLogs: (id: string) => request<TaskLogs>(`/api/tasks/${id}/logs`),
 }
 
 export function terminalUrl(id: string): string {

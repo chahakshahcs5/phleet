@@ -3,6 +3,7 @@ package httpapi_test
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -96,6 +97,23 @@ func (h *harness) do(t *testing.T, method, path string, body any, out any) int {
 	}
 	req.Header.Set("Authorization", "Bearer "+h.cfg.AdminToken)
 	req.Header.Set("Content-Type", "application/json")
+	return h.doRequest(t, req, out)
+}
+
+func (h *harness) doWithHeaders(t *testing.T, method, path string, body []byte, headers map[string]string, out any) int {
+	t.Helper()
+	req, err := http.NewRequest(method, h.srv.URL+path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	return h.doRequest(t, req, out)
+}
+
+func (h *harness) doRequest(t *testing.T, req *http.Request, out any) int {
+	t.Helper()
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -487,6 +505,266 @@ func TestProjectLifecycleAPI(t *testing.T) {
 	}
 	if code := h.do(t, http.MethodGet, "/api/projects/"+created.Project.ID, nil, nil); code != 404 {
 		t.Fatalf("expected 404 after delete, got %d", code)
+	}
+}
+
+func TestStaticAndWorkerProjects(t *testing.T) {
+	h := newHarness(t)
+	if err := h.store.UpsertServer(model.Server{ID: "phone-x", Name: "Test Phone", Status: "online"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var static projectResp
+	code := h.do(t, http.MethodPost, "/api/projects", map[string]any{
+		"name": "Docs", "kind": "static", "repo": "https://example.com/docs.git",
+		"branch": "main", "staticDir": "dist", "serverId": "phone-x",
+	}, &static)
+	if code != 201 {
+		t.Fatalf("create static status %d", code)
+	}
+	if static.Project.Kind != "static" || static.Project.StaticDir != "dist" || static.Project.StartCmd != "" {
+		t.Fatalf("unexpected static project: %+v", static.Project)
+	}
+	if static.Project.Hostname == "" || static.Project.URL == "" {
+		t.Fatalf("static project needs a URL: %+v", static.Project)
+	}
+	if len(static.Project.Placements) != 1 || static.Project.Placements[0].Port < 4100 {
+		t.Fatalf("static placement: %+v", static.Project.Placements)
+	}
+
+	var worker projectResp
+	code = h.do(t, http.MethodPost, "/api/projects", map[string]any{
+		"name": "Jobs", "kind": "worker", "repo": "https://example.com/jobs.git",
+		"branch": "main", "startCmd": "node worker.js", "serverId": "phone-x",
+	}, &worker)
+	if code != 201 {
+		t.Fatalf("create worker status %d", code)
+	}
+	if worker.Project.Kind != "worker" || worker.Project.Hostname != "" || worker.Project.URL != "" {
+		t.Fatalf("unexpected worker project: %+v", worker.Project)
+	}
+	if len(worker.Project.Placements) != 1 || worker.Project.Placements[0].Port != 0 {
+		t.Fatalf("worker must not reserve a port: %+v", worker.Project.Placements)
+	}
+
+	// Static directories are confined to the release tree.
+	if code := h.do(t, http.MethodPatch, "/api/projects/"+static.Project.ID, map[string]any{
+		"staticDir": "../etc",
+	}, nil); code != 400 {
+		t.Fatalf("expected 400 for escaping static dir, got %d", code)
+	}
+	// Workers have no public hostname.
+	if code := h.do(t, http.MethodPatch, "/api/projects/"+worker.Project.ID, map[string]any{
+		"customHostname": "jobs.example.com",
+	}, nil); code != 400 {
+		t.Fatalf("expected 400 for a worker custom domain, got %d", code)
+	}
+}
+
+func TestScheduledTaskAPI(t *testing.T) {
+	h := newHarness(t)
+	if err := h.store.UpsertServer(model.Server{ID: "phone-x", Name: "Test Phone", Status: "online"}); err != nil {
+		t.Fatal(err)
+	}
+	var created projectResp
+	if code := h.do(t, http.MethodPost, "/api/projects", map[string]any{
+		"name": "Demo", "repo": "https://example.com/demo.git",
+		"branch": "main", "startCmd": "node server.js", "serverId": "phone-x",
+	}, &created); code != 201 {
+		t.Fatalf("create project status %d", code)
+	}
+
+	var made struct {
+		Task struct {
+			model.Task
+			NextRun   int64 `json:"nextRun"`
+			Available bool  `json:"available"`
+		} `json:"task"`
+	}
+	code := h.do(t, http.MethodPost, "/api/tasks", map[string]any{
+		"name": "Nightly prune", "serverId": "phone-x", "projectId": created.Project.ID,
+		"command": "npm run prune", "cron": "0 3 * * *", "timeoutSec": 600,
+	}, &made)
+	if code != 201 {
+		t.Fatalf("create task status %d", code)
+	}
+	if made.Task.Name != "Nightly prune" || !made.Task.Enabled || made.Task.NextRun == 0 || !made.Task.Available {
+		t.Fatalf("unexpected task: %+v", made.Task)
+	}
+
+	if code := h.do(t, http.MethodPost, "/api/tasks", map[string]any{
+		"name": "Bad", "serverId": "phone-x", "command": "true", "cron": "nope",
+	}, nil); code != 400 {
+		t.Fatalf("invalid cron status %d", code)
+	}
+	if code := h.do(t, http.MethodPost, "/api/tasks", map[string]any{
+		"name": "Second task", "serverId": "phone-x", "projectId": created.Project.ID,
+		"command": "true", "cron": "* * * * *",
+	}, nil); code != 201 {
+		t.Fatalf("second task status %d", code)
+	}
+
+	// The phone is not connected, so run-now and logs must fail cleanly.
+	if code := h.do(t, http.MethodPost, "/api/tasks/"+made.Task.ID+"/run", nil, nil); code != 409 {
+		t.Fatalf("offline run status %d", code)
+	}
+	if code := h.do(t, http.MethodGet, "/api/tasks/"+made.Task.ID+"/logs", nil, nil); code != 409 {
+		t.Fatalf("offline logs status %d", code)
+	}
+
+	var patched struct {
+		Task model.Task `json:"task"`
+	}
+	if code := h.do(t, http.MethodPatch, "/api/tasks/"+made.Task.ID, map[string]any{
+		"enabled": false, "cron": "0 4 * * *",
+	}, &patched); code != 200 || patched.Task.Enabled || patched.Task.Cron != "0 4 * * *" {
+		t.Fatalf("patch task: %d %+v", code, patched.Task)
+	}
+
+	var list struct {
+		Tasks []struct {
+			model.Task
+			NextRun int64 `json:"nextRun"`
+		} `json:"tasks"`
+	}
+	if code := h.do(t, http.MethodGet, "/api/tasks", nil, &list); code != 200 || len(list.Tasks) != 2 {
+		t.Fatalf("list tasks: %d %+v", code, list)
+	}
+	if list.Tasks[0].Enabled && list.Tasks[0].NextRun == 0 {
+		t.Fatalf("enabled task has no next run: %+v", list.Tasks[0])
+	}
+
+	if code := h.do(t, http.MethodDelete, "/api/tasks/"+made.Task.ID, nil, nil); code != 200 {
+		t.Fatalf("delete task status %d", code)
+	}
+	if code := h.do(t, http.MethodDelete, "/api/tasks/"+made.Task.ID, nil, nil); code != 404 {
+		t.Fatalf("second delete status %d", code)
+	}
+}
+
+func TestWebhookAndDeployRefAPI(t *testing.T) {
+	h := newHarness(t)
+	if err := h.store.UpsertServer(model.Server{ID: "phone-x", Name: "Test Phone", Status: "online"}); err != nil {
+		t.Fatal(err)
+	}
+	var created projectResp
+	if code := h.do(t, http.MethodPost, "/api/projects", map[string]any{
+		"name": "Hooked", "repo": "https://example.com/hooked.git",
+		"branch": "main", "startCmd": "node server.js", "serverId": "phone-x",
+	}, &created); code != 201 {
+		t.Fatalf("create project status %d", code)
+	}
+
+	var hook struct {
+		Configured bool   `json:"configured"`
+		Secret     string `json:"secret"`
+		GithubURL  string `json:"githubUrl"`
+		GitlabURL  string `json:"gitlabUrl"`
+	}
+	if code := h.do(t, http.MethodPost, "/api/projects/"+created.Project.ID+"/webhook/rotate", nil, &hook); code != 200 {
+		t.Fatalf("rotate webhook status %d", code)
+	}
+	if !hook.Configured || hook.Secret == "" || hook.GithubURL == "" || hook.GitlabURL == "" {
+		t.Fatalf("unexpected webhook response: %+v", hook)
+	}
+
+	body := []byte(`{"ref":"refs/heads/main","after":"0123456789abcdef0123456789abcdef01234567"}`)
+	bad := map[string]string{"X-Hub-Signature-256": "sha256=deadbeef", "X-GitHub-Event": "push"}
+	if code := h.doWithHeaders(t, http.MethodPost, "/hooks/github/"+created.Project.ID, body, bad, nil); code != 401 {
+		t.Fatalf("bad github signature status %d", code)
+	}
+	mac := hmac.New(sha256.New, []byte(hook.Secret))
+	mac.Write(body)
+	good := map[string]string{
+		"X-Hub-Signature-256": "sha256=" + hex.EncodeToString(mac.Sum(nil)),
+		"X-GitHub-Event":      "push",
+	}
+	// The phone is not connected, so the signature passes and deployment is
+	// rejected because there is no online replica.
+	if code := h.doWithHeaders(t, http.MethodPost, "/hooks/github/"+created.Project.ID, body, good, nil); code != 409 {
+		t.Fatalf("valid github webhook status %d", code)
+	}
+	// A different branch is ignored before any deployment is attempted.
+	wrongBranch := []byte(`{"ref":"refs/heads/develop","after":"0123456789abcdef0123456789abcdef01234567"}`)
+	mac = hmac.New(sha256.New, []byte(hook.Secret))
+	mac.Write(wrongBranch)
+	good["X-Hub-Signature-256"] = "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	if code := h.doWithHeaders(t, http.MethodPost, "/hooks/github/"+created.Project.ID, wrongBranch, good, nil); code != 202 {
+		t.Fatalf("wrong branch status %d", code)
+	}
+
+	if code := h.doWithHeaders(t, http.MethodPost, "/hooks/gitlab/"+created.Project.ID, body, map[string]string{
+		"X-Gitlab-Token": "wrong", "X-Gitlab-Event": "Push Hook",
+	}, nil); code != 401 {
+		t.Fatalf("bad gitlab token status %d", code)
+	}
+	if code := h.doWithHeaders(t, http.MethodPost, "/hooks/gitlab/"+created.Project.ID, wrongBranch, map[string]string{
+		"X-Gitlab-Token": hook.Secret, "X-Gitlab-Event": "Push Hook",
+	}, nil); code != 202 {
+		t.Fatalf("gitlab wrong branch status %d", code)
+	}
+
+	if code := h.do(t, http.MethodPost, "/api/projects/"+created.Project.ID+"/deploy", map[string]any{
+		"ref": "../evil",
+	}, nil); code != 400 {
+		t.Fatalf("invalid ref status %d", code)
+	}
+	if code := h.do(t, http.MethodPost, "/api/projects/"+created.Project.ID+"/deploy", map[string]any{
+		"ref": "v1.2.3",
+	}, nil); code != 409 {
+		t.Fatalf("valid ref while offline status %d", code)
+	}
+	if code := h.do(t, http.MethodGet, "/api/projects/"+created.Project.ID+"/releases?serverId=phone-x", nil, nil); code != 409 {
+		t.Fatalf("offline releases status %d", code)
+	}
+	if code := h.do(t, http.MethodPost, "/api/projects/"+created.Project.ID+"/rollback", map[string]any{
+		"serverId": "phone-x", "release": "20260101-000000",
+	}, nil); code != 409 {
+		t.Fatalf("offline release rollback status %d", code)
+	}
+}
+
+func TestObservabilityAPI(t *testing.T) {
+	h := newHarness(t)
+	if err := h.store.UpsertServer(model.Server{ID: "phone-x", Name: "Test Phone", Status: "online"}); err != nil {
+		t.Fatal(err)
+	}
+	var created projectResp
+	if code := h.do(t, http.MethodPost, "/api/projects", map[string]any{
+		"name": "Observed", "repo": "https://example.com/obs.git",
+		"branch": "main", "startCmd": "node server.js", "serverId": "phone-x",
+	}, &created); code != 201 {
+		t.Fatalf("create project status %d", code)
+	}
+	now := time.Now().Unix()
+	if err := h.store.InsertAppMetric(created.Project.ID, "phone-x", now, 12.5, 4<<20); err != nil {
+		t.Fatal(err)
+	}
+	var metrics struct {
+		Samples []model.AppSample `json:"samples"`
+	}
+	if code := h.do(t, http.MethodGet, "/api/projects/"+created.Project.ID+"/metrics?minutes=60", nil, &metrics); code != 200 {
+		t.Fatalf("metrics status %d", code)
+	}
+	if len(metrics.Samples) != 1 || metrics.Samples[0].CPUPercent != 12.5 || metrics.Samples[0].RSS != 4<<20 {
+		t.Fatalf("metrics: %+v", metrics.Samples)
+	}
+
+	if err := h.store.InsertRequestLog(model.RequestLog{
+		ProjectID: created.Project.ID, ServerID: "phone-x", TS: now,
+		Method: "GET", Path: "/api/items?limit=2", Status: 200, Bytes: 42,
+		DurationMS: 7, Host: "observed.localhost", IP: "203.0.113.9",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var requests struct {
+		Requests []model.RequestLog `json:"requests"`
+	}
+	if code := h.do(t, http.MethodGet, "/api/projects/"+created.Project.ID+"/requests?limit=10", nil, &requests); code != 200 {
+		t.Fatalf("requests status %d", code)
+	}
+	if len(requests.Requests) != 1 || requests.Requests[0].Path != "/api/items?limit=2" || requests.Requests[0].Status != 200 {
+		t.Fatalf("requests: %+v", requests.Requests)
 	}
 }
 

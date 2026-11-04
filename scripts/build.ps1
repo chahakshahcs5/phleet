@@ -78,6 +78,7 @@ if (-not $SkipAgent) {
   $oldCGO = $env:CGO_ENABLED
   $oldGOOS = $env:GOOS
   $oldGOARCH = $env:GOARCH
+  $oldGOARM = $env:GOARM
   $oldToolchain = $env:GOTOOLCHAIN
   $oldFlags = $env:GOFLAGS
   try {
@@ -91,6 +92,9 @@ if (-not $SkipAgent) {
     $env:GOTOOLCHAIN = 'go1.22.12'
     $env:GOFLAGS = "-modfile=" + (Join-Path $root 'go122.mod')
     Invoke-Native "agent linux/arm64 (Go 1.22 for Android 10)" { go build -trimpath -ldflags "-s -w" -o dist\bin\phleet-agent-linux-arm64 ./cmd/phleet-agent }
+    $env:GOARCH = 'arm'
+    $env:GOARM = '7'
+    Invoke-Native "agent linux/armv7 (Go 1.22 for older phones)" { go build -trimpath -ldflags "-s -w" -o dist\bin\phleet-agent-linux-arm ./cmd/phleet-agent }
 
     $env:GOTOOLCHAIN = $oldToolchain
     $env:GOFLAGS = $oldFlags
@@ -101,6 +105,7 @@ if (-not $SkipAgent) {
     $env:CGO_ENABLED = $oldCGO
     $env:GOOS = $oldGOOS
     $env:GOARCH = $oldGOARCH
+    $env:GOARM = $oldGOARM
     $env:GOTOOLCHAIN = $oldToolchain
     $env:GOFLAGS = $oldFlags
   }

@@ -124,6 +124,7 @@ func (s *Server) onHello(hb agentproto.Hello) error {
 	s.triggerReconcile()
 	go s.syncRelaysForServer(hb.ID)
 	go s.syncAddonLeases(hb.ID)
+	go s.syncTasksForServer(hb.ID)
 	return nil
 }
 
@@ -162,6 +163,14 @@ func (s *Server) onHeartbeat(id string, hb agentproto.Heartbeat) {
 	}
 	for _, app := range hb.Apps {
 		s.syncAppStatus(id, app)
+	}
+	for _, task := range hb.Tasks {
+		if task.ID == "" || (task.LastRun == 0 && task.Status == "") {
+			continue
+		}
+		if err := s.st.TouchTaskRun(task.ID, task.LastRun, task.Status, task.ExitCode, task.Error, ""); err != nil {
+			s.log.Debug("task status", "task", task.ID, "err", err)
+		}
 	}
 }
 

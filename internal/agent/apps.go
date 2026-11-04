@@ -30,6 +30,7 @@ const (
 )
 
 var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+var releaseRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 type AppSpec struct {
 	Name     string `json:"name"`
@@ -46,6 +47,7 @@ type AppSpec struct {
 	InternalPort int               `json:"internalPort,omitempty"`
 	StartCmd     string            `json:"startCmd"`
 	HealthPath   string            `json:"healthPath"`
+	StaticDir    string            `json:"staticDir,omitempty"`
 	HealthCmd    string            `json:"healthCmd,omitempty"`
 	LagCmd       string            `json:"lagCmd,omitempty"`
 	LeaseSeconds int               `json:"leaseSeconds,omitempty"`
@@ -76,11 +78,15 @@ type appProcess struct {
 	logPath   string
 	startedAt time.Time
 	proxy     *appProxy
+	static    *staticServer
 }
 
 func (a *Agent) appBase(slug string) string {
 	return filepath.Join(a.home, "apps", slug)
 }
+
+func isWorkerSpec(spec AppSpec) bool { return spec.Kind == "worker" }
+func isStaticSpec(spec AppSpec) bool { return spec.Kind == "static" }
 
 func isAddonSpec(spec AppSpec) bool {
 	if spec.Addon {
@@ -264,7 +270,10 @@ func (a *Agent) restoreApps() {
 	a.appsMu.Unlock()
 	go func() {
 		for i, spec := range specs {
-			if spec.StartCmd == "" || spec.ReleaseDir == "" {
+			if spec.ReleaseDir == "" {
+				continue
+			}
+			if spec.StartCmd == "" && !isStaticSpec(spec) {
 				continue
 			}
 			if i > 0 {
@@ -295,7 +304,7 @@ func (a *Agent) restoreApps() {
 // agent is killed, and /proc/net/tcp is not readable there, so the pidfile plus
 // the process working directory are the reliable evidence.
 func (a *Agent) adoptRunning(p *appProcess, spec AppSpec) bool {
-	if spec.Embedded || spec.Port <= 0 || !portListening(appPort(spec)) {
+	if spec.Embedded || isStaticSpec(spec) || isWorkerSpec(spec) || spec.Port <= 0 || !portListening(appPort(spec)) {
 		return false
 	}
 	if !isAddonSpec(spec) {
@@ -322,6 +331,12 @@ func (a *Agent) adoptRunning(p *appProcess, spec AppSpec) bool {
 	}
 	if pid == 0 {
 		return false
+	}
+	if !isAddonSpec(spec) {
+		if spec.DataDir == "" {
+			spec.DataDir = filepath.Join(a.appBase(spec.Slug), "shared", "data")
+		}
+		_ = os.MkdirAll(spec.DataDir, 0o755)
 	}
 	p.mu.Lock()
 	p.spec = spec
@@ -360,10 +375,62 @@ func (a *Agent) startProcess(p *appProcess, spec AppSpec) error {
 	return nil
 }
 
+// spawnStatic starts the agent-owned file server for a static site and points
+// the public-port switchboard at it. It mirrors the process path closely enough
+// that blue-green deploys, rollback and the health check work unchanged.
+func (a *Agent) spawnStatic(p *appProcess, spec AppSpec) error {
+	if spec.Port <= 0 {
+		return errors.New("a static site needs a public port")
+	}
+	if spec.InternalPort == 0 {
+		spec.InternalPort = internalPort(spec.Port, false)
+	}
+	root, err := resolveStaticRoot(spec.ReleaseDir, spec.StaticDir)
+	if err != nil {
+		return err
+	}
+	server, err := startStaticServer(root, spec.InternalPort)
+	if err != nil {
+		return err
+	}
+	if p.proxy == nil {
+		if err := a.ensurePortFree(context.Background(), spec.Port, spec.ReleaseDir, 2*time.Second); err != nil {
+			server.close()
+			return err
+		}
+		proxy, err := newAppProxy(spec.Port)
+		if err != nil {
+			server.close()
+			return err
+		}
+		p.proxy = proxy
+	}
+	if cur := p.proxy.currentTarget(); cur == 0 || cur == spec.InternalPort {
+		p.proxy.setTarget(spec.InternalPort)
+	}
+	p.mu.Lock()
+	p.gen++
+	p.spec = spec
+	p.cmd = nil
+	p.done = nil
+	p.static = server
+	p.status = "running"
+	p.pid = 0
+	p.stopping = false
+	p.lastError = ""
+	p.logPath = filepath.Join(a.appBase(spec.Slug), "logs", "app.log")
+	p.startedAt = time.Now()
+	p.mu.Unlock()
+	a.saveApps()
+	a.log.Info("static site started", "slug", spec.Slug, "port", spec.Port, "root", root)
+	a.appendAppLog(spec.Slug, "static site serving "+root)
+	return nil
+}
+
 // spawnProcess starts a process without stopping the current one. It is used
 // by blue-green deploy to bring the new release up beside the old release.
 func (a *Agent) spawnProcess(p *appProcess, spec AppSpec) error {
-	if strings.TrimSpace(spec.StartCmd) == "" {
+	if strings.TrimSpace(spec.StartCmd) == "" && !isStaticSpec(spec) {
 		// Embedded engines (SQLite) have no process. They are "running" once
 		// their file exists; the provisioning step owns the health check.
 		if spec.Embedded || strings.EqualFold(spec.Kind, "file") {
@@ -389,8 +456,22 @@ func (a *Agent) spawnProcess(p *appProcess, spec AppSpec) error {
 	if _, err := os.Stat(spec.ReleaseDir); err != nil {
 		return fmt.Errorf("release directory missing: %w", err)
 	}
-	listenPort := spec.Port
+	// Runtime data must not live in the release directory: a deploy switches
+	// the release and prunes old ones, so anything written there is lost. Every
+	// app gets a stable directory under shared/, outside the release tree.
 	if !isAddonSpec(spec) {
+		if spec.DataDir == "" {
+			spec.DataDir = filepath.Join(a.appBase(spec.Slug), "shared", "data")
+		}
+		if err := os.MkdirAll(spec.DataDir, 0o755); err != nil {
+			return fmt.Errorf("cannot create app data directory: %w", err)
+		}
+	}
+	if isStaticSpec(spec) {
+		return a.spawnStatic(p, spec)
+	}
+	listenPort := spec.Port
+	if !isAddonSpec(spec) && !isWorkerSpec(spec) {
 		if spec.InternalPort == 0 {
 			spec.InternalPort = internalPort(spec.Port, false)
 		}
@@ -414,8 +495,10 @@ func (a *Agent) spawnProcess(p *appProcess, spec AppSpec) error {
 		}
 		listenPort = spec.InternalPort
 	}
-	if err := a.ensurePortFree(context.Background(), listenPort, spec.ReleaseDir, 3*time.Second); err != nil {
-		return err
+	if !isWorkerSpec(spec) {
+		if err := a.ensurePortFree(context.Background(), listenPort, spec.ReleaseDir, 3*time.Second); err != nil {
+			return err
+		}
 	}
 	base := a.appBase(spec.Slug)
 	logDir := filepath.Join(base, "logs")
@@ -531,7 +614,8 @@ func (a *Agent) stopProcess(p *appProcess) {
 	done := p.done
 	pid := p.pid
 	spec := p.spec
-	if cmd == nil && pid <= 0 {
+	static := p.static
+	if cmd == nil && pid <= 0 && static == nil {
 		p.status = "stopped"
 		p.stopping = false
 		p.mu.Unlock()
@@ -544,8 +628,11 @@ func (a *Agent) stopProcess(p *appProcess) {
 	}
 	p.stopping = true
 	p.mu.Unlock()
-	a.log.Info("stopping app", "slug", spec.Slug, "pid", pid, "cmd", cmd != nil)
+	a.log.Info("stopping app", "slug", spec.Slug, "pid", pid, "cmd", cmd != nil, "static", static != nil)
 
+	if static != nil {
+		static.close()
+	}
 	if cmd != nil && cmd.Process != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, sig)
 	} else if pid > 0 {
@@ -588,6 +675,9 @@ func (a *Agent) stopProcess(p *appProcess) {
 	if p.cmd == cmd {
 		p.cmd = nil
 		p.pid = 0
+		if p.static == static {
+			p.static = nil
+		}
 		p.status = "stopped"
 	}
 	p.mu.Unlock()
@@ -619,7 +709,7 @@ func (a *Agent) restartApp(slug string) error {
 	return a.startProcess(p, spec)
 }
 
-func (a *Agent) rollbackApp(slug string) error {
+func (a *Agent) rollbackApp(slug, release string) error {
 	a.appsMu.Lock()
 	p := a.apps[slug]
 	a.appsMu.Unlock()
@@ -629,28 +719,70 @@ func (a *Agent) rollbackApp(slug string) error {
 	p.mu.Lock()
 	spec := p.spec
 	p.mu.Unlock()
-	if spec.PrevRelease == "" {
+	target := spec.PrevRelease
+	if release != "" {
+		if !releaseRe.MatchString(release) {
+			return fmt.Errorf("invalid release %q", release)
+		}
+		target = filepath.Join(a.appBase(slug), "releases", release)
+		if filepath.Clean(target) == filepath.Clean(spec.ReleaseDir) {
+			return errors.New("that release is already running")
+		}
+	}
+	if target == "" {
 		return errors.New("no previous release to roll back to")
 	}
-	if _, err := os.Stat(spec.PrevRelease); err != nil {
-		return fmt.Errorf("previous release is gone: %w", err)
+	if _, err := os.Stat(target); err != nil {
+		return fmt.Errorf("release is gone: %w", err)
 	}
 	next := spec
-	next.ReleaseDir, next.PrevRelease = spec.PrevRelease, spec.ReleaseDir
+	next.ReleaseDir, next.PrevRelease = target, spec.ReleaseDir
 	next.DeployStatus = "rolled_back"
 	if err := a.startProcess(p, next); err != nil {
 		return err
 	}
 	a.swapCurrent(spec.Slug, next.ReleaseDir)
 	a.saveApps()
-	if err := waitHealthy(context.Background(), appPort(next), next.HealthPath, 30*time.Second, func() bool {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		return p.cmd != nil
-	}); err != nil {
-		return fmt.Errorf("rolled back but the app is not healthy: %w", err)
+	if !isWorkerSpec(next) {
+		if err := waitHealthy(context.Background(), appPort(next), next.HealthPath, 30*time.Second, func() bool {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			return p.cmd != nil || p.static != nil
+		}); err != nil {
+			return fmt.Errorf("rolled back but the app is not healthy: %w", err)
+		}
 	}
 	return nil
+}
+
+// appReleases lists the kept release directories for a project on this phone.
+func (a *Agent) appReleases(slug string) (agentproto.AppReleasesResponse, error) {
+	if !slugRe.MatchString(slug) {
+		return agentproto.AppReleasesResponse{}, fmt.Errorf("invalid slug")
+	}
+	dir := filepath.Join(a.appBase(slug), "releases")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return agentproto.AppReleasesResponse{Slug: slug, Releases: []agentproto.AppRelease{}}, nil
+	}
+	current := ""
+	if target, err := filepath.EvalSymlinks(filepath.Join(a.appBase(slug), "current")); err == nil {
+		current = filepath.Base(target)
+	}
+	out := make([]agentproto.AppRelease, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		st, _ := e.Info()
+		rel := agentproto.AppRelease{Name: e.Name(), Path: filepath.Join(dir, e.Name()), Current: e.Name() == current}
+		if st != nil {
+			rel.ModifiedAt = st.ModTime().Unix()
+		}
+		out = append(out, rel)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name > out[j].Name })
+	return agentproto.AppReleasesResponse{Slug: slug, Releases: out}, nil
 }
 
 func (a *Agent) deleteApp(slug string) error {
@@ -661,6 +793,9 @@ func (a *Agent) deleteApp(slug string) error {
 		return nil
 	}
 	a.stopProcess(p)
+	a.appCPUMu.Lock()
+	delete(a.appCPU, slug)
+	a.appCPUMu.Unlock()
 	if p.proxy != nil {
 		p.proxy.close()
 		p.proxy = nil
@@ -690,7 +825,7 @@ func (a *Agent) appControl(req agentproto.AppControlRequest) error {
 	case "restart":
 		return a.restartApp(req.Slug)
 	case "rollback":
-		return a.rollbackApp(req.Slug)
+		return a.rollbackApp(req.Slug, req.Release)
 	case "delete":
 		return a.deleteApp(req.Slug)
 	default:
@@ -716,19 +851,36 @@ func (a *Agent) appLogs(req agentproto.AppLogsRequest) (agentproto.AppLogsRespon
 	if max <= 0 || max > 512<<10 {
 		max = 64 << 10
 	}
+	size := st.Size()
 	start := int64(0)
-	if st.Size() > max {
-		start = st.Size() - max
+	rotated := false
+	switch {
+	case req.Offset > size:
+		// The log rotated or was truncated between two stream polls.
+		rotated = true
+	case req.Offset > 0:
+		start = req.Offset
+	case !req.FromStart:
+		if size > max {
+			start = size - max
+		}
+	}
+	end := size
+	if end-start > max {
+		end = start + max
 	}
 	if _, err := f.Seek(start, 0); err != nil {
 		return agentproto.AppLogsResponse{}, err
 	}
-	buf := make([]byte, st.Size()-start)
-	if _, err := f.Read(buf); err != nil {
-		return agentproto.AppLogsResponse{}, err
+	buf := make([]byte, end-start)
+	if len(buf) > 0 {
+		if _, err := io.ReadFull(f, buf); err != nil {
+			return agentproto.AppLogsResponse{}, err
+		}
 	}
 	return agentproto.AppLogsResponse{
-		Slug: req.Slug, Path: path, Data: buf, Size: st.Size(), Truncated: start > 0,
+		Slug: req.Slug, Path: path, Data: buf, Size: size,
+		Offset: start, Next: end, Rotated: rotated, Truncated: start > 0,
 	}, nil
 }
 
@@ -976,13 +1128,29 @@ func appEnv(spec AppSpec) []string {
 	// The agent reaches apps over loopback. Binding 0.0.0.0 would expose the
 	// port on Wi-Fi too, which contradicts "phones never accept inbound".
 	// Users who explicitly want LAN access can override HOST in project env.
-	env = append(env,
-		"PORT="+fmt.Sprint(appPort(spec)),
-		"HOST=127.0.0.1",
-		"NODE_ENV=production",
-		"PHLEET_APP="+spec.Slug,
-		"PHLEET_PORT="+fmt.Sprint(spec.Port),
-	)
+	if isWorkerSpec(spec) {
+		// A worker has no listener. Omit PORT and advertise the worker contract
+		// so a framework does not assume it is a web server.
+		env = append(env,
+			"NODE_ENV=production",
+			"PHLEET_APP="+spec.Slug,
+			"PHLEET_WORKER=1",
+		)
+	} else {
+		env = append(env,
+			"PORT="+fmt.Sprint(appPort(spec)),
+			"HOST=127.0.0.1",
+			"NODE_ENV=production",
+			"PHLEET_APP="+spec.Slug,
+			"PHLEET_PORT="+fmt.Sprint(spec.Port),
+		)
+	}
+	if spec.DataDir != "" {
+		env = append(env,
+			"PHLEET_DATA_DIR="+spec.DataDir,
+			"PHLEET_SECRETS_DIR="+filepath.Join(filepath.Dir(spec.DataDir), "secrets"),
+		)
+	}
 	keys := make([]string, 0, len(spec.Env))
 	for k := range spec.Env {
 		keys = append(keys, k)
@@ -992,6 +1160,23 @@ func appEnv(spec AppSpec) []string {
 		env = append(env, k+"="+spec.Env[k])
 	}
 	return env
+}
+
+// appendAppLog adds a control-plane-visible line to an app's app.log. Static
+// sites have no process stdout, so this is how their lifecycle shows up in the
+// Logs tab.
+func (a *Agent) appendAppLog(slug, line string) {
+	path := filepath.Join(a.appBase(slug), "logs", "app.log")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	rotateLog(path, appLogMaxBytes)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = fmt.Fprintf(f, "%s %s\n", time.Now().Format("2006-01-02 15:04:05"), line)
 }
 
 func rotateLog(path string, max int64) {

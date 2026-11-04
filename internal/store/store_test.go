@@ -91,7 +91,7 @@ func TestMetricsAndPrune(t *testing.T) {
 	if err := st.UpsertServer(model.Server{ID: "p", Name: "p", Status: "online"}); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().Unix()
+	now := (time.Now().Unix()/3600)*3600 + 600
 	for i := 0; i < 5; i++ {
 		err := st.InsertMetrics("p", model.Metrics{
 			CPUPercent: float64(10 + i), MemUsed: 100, MemTotal: 1000,

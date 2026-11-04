@@ -63,6 +63,41 @@ CREATE TABLE IF NOT EXISTS metrics (
 CREATE INDEX IF NOT EXISTS idx_metrics_server_ts ON metrics(server_id, ts);
 CREATE INDEX IF NOT EXISTS idx_metrics_ts ON metrics(ts);
 
+CREATE TABLE IF NOT EXISTS app_metrics (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id  TEXT NOT NULL,
+  server_id   TEXT NOT NULL,
+  ts          INTEGER NOT NULL,
+  cpu         REAL NOT NULL DEFAULT 0,
+  rss         INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_app_metrics_project_ts ON app_metrics(project_id, ts);
+CREATE INDEX IF NOT EXISTS idx_app_metrics_ts ON app_metrics(ts);
+
+CREATE TABLE IF NOT EXISTS request_logs (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id  TEXT NOT NULL,
+  server_id   TEXT NOT NULL,
+  ts          INTEGER NOT NULL,
+  method      TEXT NOT NULL DEFAULT '',
+  path        TEXT NOT NULL DEFAULT '',
+  status      INTEGER NOT NULL DEFAULT 0,
+  bytes       INTEGER NOT NULL DEFAULT 0,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  host        TEXT NOT NULL DEFAULT '',
+  ip          TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_request_logs_project_ts ON request_logs(project_id, ts);
+CREATE INDEX IF NOT EXISTS idx_request_logs_ts ON request_logs(ts);
+
+CREATE TABLE IF NOT EXISTS uptime_checks (
+  project_id  TEXT PRIMARY KEY,
+  checked_at  INTEGER NOT NULL DEFAULT 0,
+  ok          INTEGER NOT NULL DEFAULT 0,
+  status_code INTEGER NOT NULL DEFAULT 0,
+  error       TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS events (
   id     INTEGER PRIMARY KEY AUTOINCREMENT,
   ts     INTEGER NOT NULL,
@@ -84,6 +119,7 @@ CREATE TABLE IF NOT EXISTS projects (
   build_cmd   TEXT NOT NULL DEFAULT '',
   start_cmd   TEXT NOT NULL DEFAULT '',
   health_path TEXT NOT NULL DEFAULT '/',
+  static_dir  TEXT NOT NULL DEFAULT '',
   hostname    TEXT NOT NULL DEFAULT '',
   custom_hostname TEXT NOT NULL DEFAULT '',
   env_enc     TEXT NOT NULL DEFAULT '',
@@ -93,9 +129,12 @@ CREATE TABLE IF NOT EXISTS projects (
   source_type TEXT NOT NULL DEFAULT 'git',
   source_size INTEGER NOT NULL DEFAULT 0,
   source_updated_at INTEGER NOT NULL DEFAULT 0,
+  basic_auth_user TEXT NOT NULL DEFAULT '',
+  basic_auth_hash TEXT NOT NULL DEFAULT '',
   parent_id   TEXT NOT NULL DEFAULT '',
   kind        TEXT NOT NULL DEFAULT 'app',
   stack_order INTEGER NOT NULL DEFAULT 0,
+  webhook_secret_enc TEXT NOT NULL DEFAULT '',
   created_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_projects_hostname ON projects(hostname);
@@ -149,6 +188,26 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status, updated_at);
 
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+  id           TEXT PRIMARY KEY,
+  name         TEXT NOT NULL,
+  server_id    TEXT NOT NULL,
+  project_id   TEXT NOT NULL DEFAULT '',
+  command      TEXT NOT NULL,
+  cron         TEXT NOT NULL,
+  timeout_sec  INTEGER NOT NULL DEFAULT 300,
+  enabled      INTEGER NOT NULL DEFAULT 1,
+  last_run     INTEGER NOT NULL DEFAULT 0,
+  last_status  TEXT NOT NULL DEFAULT '',
+  last_exit    INTEGER NOT NULL DEFAULT 0,
+  last_error   TEXT NOT NULL DEFAULT '',
+  last_output  TEXT NOT NULL DEFAULT '',
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_server ON scheduled_tasks(server_id, name);
+CREATE INDEX IF NOT EXISTS idx_tasks_project ON scheduled_tasks(project_id);
+
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -181,6 +240,8 @@ CREATE TABLE IF NOT EXISTS addons (
   service          INTEGER NOT NULL DEFAULT 0,
   app_id           TEXT NOT NULL DEFAULT '',
   version          TEXT NOT NULL DEFAULT '',
+  data_used_mb     INTEGER NOT NULL DEFAULT 0,
+  usage_checked_at INTEGER NOT NULL DEFAULT 0,
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL
 );
@@ -270,11 +331,34 @@ CREATE TABLE IF NOT EXISTS backups (
   checksum    TEXT NOT NULL DEFAULT '',
   encrypted   INTEGER NOT NULL DEFAULT 0,
   path        TEXT NOT NULL DEFAULT '',
+  remote_status TEXT NOT NULL DEFAULT '',
+  remote_key  TEXT NOT NULL DEFAULT '',
+  remote_error TEXT NOT NULL DEFAULT '',
+  remote_at   INTEGER NOT NULL DEFAULT 0,
   error       TEXT NOT NULL DEFAULT '',
   created_at  INTEGER NOT NULL,
   finished_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_backups_addon ON backups(addon_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS backup_drills (
+  id          TEXT PRIMARY KEY,
+  addon_id    TEXT NOT NULL,
+  backup_id   TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  detail      TEXT NOT NULL DEFAULT '',
+  started_at  INTEGER NOT NULL,
+  finished_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_backup_drills_addon ON backup_drills(addon_id, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS project_secrets (
+  project_id  TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  content_enc TEXT NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  PRIMARY KEY (project_id, name)
+);
 `
 
 func Open(path string) (*Store, error) {
@@ -320,6 +404,10 @@ func Open(path string) (*Store, error) {
 		{"projects", "parent_id", "TEXT NOT NULL DEFAULT ''"},
 		{"projects", "kind", "TEXT NOT NULL DEFAULT 'app'"},
 		{"projects", "stack_order", "INTEGER NOT NULL DEFAULT 0"},
+		{"projects", "static_dir", "TEXT NOT NULL DEFAULT ''"},
+		{"projects", "webhook_secret_enc", "TEXT NOT NULL DEFAULT ''"},
+		{"projects", "basic_auth_user", "TEXT NOT NULL DEFAULT ''"},
+		{"projects", "basic_auth_hash", "TEXT NOT NULL DEFAULT ''"},
 		{"placements", "pid", "INTEGER NOT NULL DEFAULT 0"},
 		{"placements", "restarts", "INTEGER NOT NULL DEFAULT 0"},
 		{"placements", "release", "TEXT NOT NULL DEFAULT ''"},
@@ -345,9 +433,15 @@ func Open(path string) (*Store, error) {
 		{"addons", "service", "INTEGER NOT NULL DEFAULT 0"},
 		{"addons", "app_id", "TEXT NOT NULL DEFAULT ''"},
 		{"addons", "version", "TEXT NOT NULL DEFAULT ''"},
+		{"addons", "data_used_mb", "INTEGER NOT NULL DEFAULT 0"},
+		{"addons", "usage_checked_at", "INTEGER NOT NULL DEFAULT 0"},
 		{"addon_placements", "lag_ms", "INTEGER NOT NULL DEFAULT 0"},
 		{"backups", "checksum", "TEXT NOT NULL DEFAULT ''"},
 		{"backups", "encrypted", "INTEGER NOT NULL DEFAULT 0"},
+		{"backups", "remote_status", "TEXT NOT NULL DEFAULT ''"},
+		{"backups", "remote_key", "TEXT NOT NULL DEFAULT ''"},
+		{"backups", "remote_error", "TEXT NOT NULL DEFAULT ''"},
+		{"backups", "remote_at", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, m := range migrations {
 		if err := ensureColumn(db, m.table, m.column, m.decl); err != nil {
@@ -726,6 +820,36 @@ func (q EventQuery) where() (string, []any) {
 		return "", nil
 	}
 	return "WHERE " + strings.Join(conds, " AND "), args
+}
+
+// ExportEvents returns up to limit events in chronological order, bypassing
+// the 200-row page cap for audit exports.
+func (s *Store) ExportEvents(q EventQuery, limit int) ([]model.Event, error) {
+	if limit <= 0 || limit > 50000 {
+		limit = 10000
+	}
+	where, args := q.where()
+	args = append(args, limit)
+	rows, err := s.db.Query(`SELECT id,ts,actor,action,target,detail FROM events `+where+` ORDER BY id DESC LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.Event{}
+	for rows.Next() {
+		var e model.Event
+		if err := rows.Scan(&e.ID, &e.TS, &e.Actor, &e.Action, &e.Target, &e.Detail); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
 }
 
 // ListEventsPage returns newest-first events plus whether an older page exists.

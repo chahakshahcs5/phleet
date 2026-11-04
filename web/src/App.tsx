@@ -16,6 +16,7 @@ import ProjectDetail from './pages/ProjectDetail'
 import StackDetail from './pages/StackDetail'
 import ServerDetail from './pages/ServerDetail'
 import Settings from './pages/Settings'
+import Tasks from './pages/Tasks'
 import { Button, Spinner } from './components/ui'
 
 export default function App() {
@@ -62,6 +63,7 @@ export default function App() {
         <Route path="data" element={<Navigate to="/addons" replace />} />
         <Route path="data/:id" element={<Navigate to="/addons" replace />} />
         <Route path="alerts" element={<Alerts />} />
+        <Route path="tasks" element={<Tasks />} />
         <Route path="servers/add" element={<AddPhone />} />
         <Route path="servers/:id" element={<ServerDetail />} />
         <Route path="events" element={<Events />} />

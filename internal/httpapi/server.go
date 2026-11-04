@@ -59,6 +59,13 @@ type Server struct {
 	bridges *tcpBridge
 
 	reconcileCh chan struct{}
+	reqLogCh    chan model.RequestLog
+
+	appMetricMu sync.Mutex
+	appMetricAt map[string]time.Time
+
+	drillMu      sync.Mutex
+	drillRunning map[string]bool
 }
 
 func New(cfg *config.Config, st *store.Store, log *slog.Logger) *Server {
@@ -71,6 +78,9 @@ func New(cfg *config.Config, st *store.Store, log *slog.Logger) *Server {
 		pendingDevice: map[string]string{},
 		apiUse:        map[string]time.Time{},
 		reconcileCh:   make(chan struct{}, 1),
+		reqLogCh:      make(chan model.RequestLog, 2048),
+		appMetricAt:   map[string]time.Time{},
+		drillRunning:  map[string]bool{},
 		tunnel:        newTunnelManager(cfg, log),
 	}
 	s.edge.publicURL = cfg.PublicURL
@@ -81,6 +91,7 @@ func New(cfg *config.Config, st *store.Store, log *slog.Logger) *Server {
 		OnDisconnect:  s.onDisconnect,
 		OnDeployEvent: s.onDeployEvent,
 		OnAddonEvent:  s.onAddonEvent,
+		OnTaskEvent:   s.onTaskEvent,
 	})
 	s.routes()
 	s.panel = s.guard(securityHeaders(s.mux))
@@ -196,6 +207,7 @@ func (s *Server) routes() {
 	api.HandleFunc("POST /edge/tunnel/restart", s.handleTunnelAction("restart"))
 	api.HandleFunc("GET /events", s.handleEvents)
 	api.HandleFunc("GET /events/facets", s.handleEventFacets)
+	api.HandleFunc("GET /events/export", s.handleExportEvents)
 	api.HandleFunc("GET /jobs/{id}", s.handleGetJob)
 	api.HandleFunc("GET /totp", s.handleGetTOTP)
 	api.HandleFunc("POST /totp/setup", s.handleSetupTOTP)
@@ -227,6 +239,10 @@ func (s *Server) routes() {
 	api.HandleFunc("POST /servers/{id}/upload-folder", s.handleUploadFolder)
 	api.HandleFunc("GET /servers/{id}/download", s.handleDownload)
 	api.HandleFunc("GET /servers/{id}/terminal", s.handleTerminal)
+	api.HandleFunc("POST /servers/{id}/update", s.handleUpdateAgent)
+	api.HandleFunc("POST /servers/update", s.handleUpdateAllAgents)
+	api.HandleFunc("POST /servers/batch/exec", s.handleBatchExec)
+	api.HandleFunc("POST /servers/{id}/retire", s.handleRetireServer)
 	api.HandleFunc("POST /rebalance", s.handleRebalance)
 
 	api.HandleFunc("GET /projects", s.handleListProjects)
@@ -235,12 +251,23 @@ func (s *Server) routes() {
 	api.HandleFunc("PATCH /projects/{id}", s.handleUpdateProject)
 	api.HandleFunc("DELETE /projects/{id}", s.handleDeleteProject)
 	api.HandleFunc("POST /projects/{id}/deploy", s.handleDeploy)
-	api.HandleFunc("POST /projects/{id}/rollback", s.handleProjectAction("rollback"))
+	api.HandleFunc("POST /projects/{id}/rollback", s.handleRollback)
+	api.HandleFunc("GET /projects/{id}/releases", s.handleProjectReleases)
+	api.HandleFunc("GET /projects/{id}/webhook", s.handleGetProjectWebhook)
+	api.HandleFunc("POST /projects/{id}/webhook/rotate", s.handleRotateProjectWebhook)
+	api.HandleFunc("GET /projects/{id}/secrets", s.handleListProjectSecrets)
+	api.HandleFunc("PUT /projects/{id}/secrets/{name}", s.handlePutProjectSecret)
+	api.HandleFunc("DELETE /projects/{id}/secrets/{name}", s.handleDeleteProjectSecret)
+	api.HandleFunc("POST /projects/{id}/domain/cloudflare", s.handleCreateCustomDomain)
 	api.HandleFunc("POST /projects/{id}/restart", s.handleProjectAction("restart"))
 	api.HandleFunc("POST /projects/{id}/stop", s.handleProjectAction("stop"))
 	api.HandleFunc("POST /projects/{id}/start", s.handleProjectAction("start"))
 	api.HandleFunc("GET /projects/{id}/deployments", s.handleDeployments)
 	api.HandleFunc("GET /projects/{id}/logs", s.handleAppLogs)
+	api.HandleFunc("GET /projects/{id}/logs/stream", s.handleProjectLogStream)
+	api.HandleFunc("GET /projects/{id}/metrics", s.handleProjectMetrics)
+	api.HandleFunc("GET /projects/{id}/requests", s.handleProjectRequests)
+	api.HandleFunc("GET /projects/{id}/uptime", s.handleProjectUptime)
 	api.HandleFunc("POST /projects/{id}/source", s.handleUploadSource)
 	api.HandleFunc("GET /deployments/{id}", s.handleDeployment)
 
@@ -280,6 +307,16 @@ func (s *Server) routes() {
 	api.HandleFunc("GET /addons/{id}/backups", s.handleListBackups)
 	api.HandleFunc("POST /addons/{id}/restore", s.handleRestoreBackup)
 	api.HandleFunc("POST /addons/{id}/backups/{backupId}/verify", s.handleVerifyBackup)
+	api.HandleFunc("GET /addons/{id}/drills", s.handleListDrills)
+	api.HandleFunc("POST /addons/{id}/drills", s.handleRunDrill)
+	api.HandleFunc("GET /addons/{id}/usage", s.handleAddonUsage)
+
+	api.HandleFunc("GET /backup-remote", s.handleGetBackupRemote)
+	api.HandleFunc("PUT /backup-remote", s.handlePutBackupRemote)
+	api.HandleFunc("POST /backup-remote/test", s.handleTestBackupRemote)
+	api.HandleFunc("POST /backup-remote/sync", s.handleSyncBackupRemote)
+	api.HandleFunc("GET /backup-drill", s.handleGetBackupDrill)
+	api.HandleFunc("PUT /backup-drill", s.handlePutBackupDrill)
 
 	api.HandleFunc("GET /alerts", s.handleListAlerts)
 	api.HandleFunc("GET /alerts/count", s.handleAlertCount)
@@ -289,6 +326,13 @@ func (s *Server) routes() {
 	api.HandleFunc("GET /notify", s.handleGetNotify)
 	api.HandleFunc("PUT /notify", s.handlePutNotify)
 	api.HandleFunc("POST /notify/test", s.handleTestNotify)
+
+	api.HandleFunc("GET /tasks", s.handleListTasks)
+	api.HandleFunc("POST /tasks", s.handleCreateTask)
+	api.HandleFunc("PATCH /tasks/{id}", s.handleUpdateTask)
+	api.HandleFunc("DELETE /tasks/{id}", s.handleDeleteTask)
+	api.HandleFunc("POST /tasks/{id}/run", s.handleRunTask)
+	api.HandleFunc("GET /tasks/{id}/logs", s.handleTaskLogs)
 
 	s.mux.Handle("POST /api/login", http.HandlerFunc(s.handleLogin))
 	s.mux.HandleFunc("GET /api/meta", s.handleMeta)
@@ -309,6 +353,8 @@ func (s *Server) routes() {
 	s.mux.Handle("/api/", http.StripPrefix("/api", s.requirePanelAuth(api)))
 	s.mux.HandleFunc("/agent", s.handleAgent)
 	s.mux.HandleFunc("/agent/data", s.handleAgentData)
+	s.mux.HandleFunc("POST /hooks/github/{id}", s.handleGithubWebhook)
+	s.mux.HandleFunc("POST /hooks/gitlab/{id}", s.handleGitlabWebhook)
 	s.mux.HandleFunc("/healthz", s.handleHealth)
 	s.mux.Handle("GET /metrics", s.requirePanelAuth(http.HandlerFunc(s.handlePrometheus)))
 	s.mux.HandleFunc("/download/agent", s.handleAgentDownload)

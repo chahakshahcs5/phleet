@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"phleet/internal/agentproto"
+	"phleet/internal/auth"
 	"phleet/internal/engines"
 	"phleet/internal/model"
 	"phleet/internal/placement"
@@ -29,8 +31,9 @@ const (
 )
 
 var (
-	slugPattern     = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,47}$`)
-	hostnamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
+	slugPattern      = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,47}$`)
+	hostnamePattern  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
+	deployRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`)
 )
 
 var reservedSlugs = map[string]bool{
@@ -53,6 +56,8 @@ type projectView struct {
 	Addons     []addonView       `json:"addons,omitempty"`
 	Latest     *model.Deployment `json:"latest,omitempty"`
 	URL        string            `json:"url"`
+	Webhook    bool              `json:"webhook"`
+	BasicAuth  bool              `json:"basicAuth"`
 }
 
 func isTerminalDeploy(s string) bool {
@@ -73,6 +78,8 @@ func (s *Server) appSuffix() string {
 
 func (s *Server) buildProjectView(p model.Project, withEnv bool) projectView {
 	v := projectView{Project: p, Env: nil, Placements: []placementView{}, Services: []projectView{}}
+	v.Webhook = p.WebhookSecretEnc != ""
+	v.BasicAuth = p.BasicAuthUser != "" && p.BasicAuthHash != ""
 	v.Addons = s.projectAddons(p.ID)
 	if p.Kind == "stack" {
 		children, _ := s.st.ListChildProjects(p.ID)
@@ -80,7 +87,12 @@ func (s *Server) buildProjectView(p model.Project, withEnv bool) projectView {
 			v.Services = append(v.Services, s.buildProjectView(child, false))
 		}
 		if len(v.Services) > 0 {
-			v.URL = v.Services[0].URL
+			for _, svc := range v.Services {
+				if svc.URL != "" {
+					v.URL = svc.URL
+					break
+				}
+			}
 		}
 		if withEnv {
 			if env, err := s.decryptEnv(p); err == nil {
@@ -93,10 +105,12 @@ func (s *Server) buildProjectView(p model.Project, withEnv bool) projectView {
 	if p.CustomHostname != "" {
 		host = p.CustomHostname
 	}
-	if _, fleetHost := s.Edge(); fleetHost != "" {
-		v.URL = "https://" + host
-	} else {
-		v.URL = "http://" + host
+	if p.Kind != "worker" && host != "" {
+		if _, fleetHost := s.Edge(); fleetHost != "" {
+			v.URL = "https://" + host
+		} else {
+			v.URL = "http://" + host
+		}
 	}
 	placements, _ := s.st.ListProjectPlacements(p.ID)
 	sort.Slice(placements, func(i, j int) bool { return placements[i].ServerID < placements[j].ServerID })
@@ -387,18 +401,26 @@ func (s *Server) ensurePlacements(p model.Project) ([]model.Placement, error) {
 	for _, serverID := range plan {
 		// Keep the read-alloc-insert sequence atomic. The single SQLite
 		// connection protects each statement, not the gap between them.
-		s.portMu.Lock()
-		port, err := s.allocatePort(serverID)
-		if err != nil {
-			s.portMu.Unlock()
-			return existing, err
+		// Workers have no listener, so they reserve no port at all.
+		port := 0
+		locked := p.Kind != "worker"
+		if locked {
+			s.portMu.Lock()
+			var err error
+			port, err = s.allocatePort(serverID)
+			if err != nil {
+				s.portMu.Unlock()
+				return existing, err
+			}
 		}
 		pl := model.Placement{
 			ProjectID: p.ID, ServerID: serverID, Port: port, Status: "pending", Desired: "running",
 			UpdatedAt: time.Now().Unix(),
 		}
 		err = s.st.UpsertPlacement(pl)
-		s.portMu.Unlock()
+		if locked {
+			s.portMu.Unlock()
+		}
 		if err != nil {
 			return existing, err
 		}
@@ -422,9 +444,17 @@ func (s *Server) hasInflight(projectID string) bool {
 }
 
 // startDeployment creates a deployment row and sends the plan to one phone.
-func (s *Server) startDeployment(p model.Project, pl model.Placement) (model.Deployment, error) {
+func (s *Server) startDeployment(p model.Project, pl model.Placement, ref string) (model.Deployment, error) {
 	if !s.hub.Online(pl.ServerID) {
 		return model.Deployment{}, errors.New("phone is offline")
+	}
+	if m, err := s.st.LatestMetrics(pl.ServerID); err == nil {
+		if m.TempC >= 70 {
+			return model.Deployment{}, fmt.Errorf("phone is at %.0f°C; let it cool before deploying", m.TempC)
+		}
+		if m.BatteryPct >= 0 && m.BatteryPct < 10 && !m.Charging {
+			return model.Deployment{}, errors.New("phone battery is below 10% and not charging")
+		}
 	}
 	sourceID := p.ID
 	sourceType := p.SourceType
@@ -449,12 +479,16 @@ func (s *Server) startDeployment(p model.Project, pl model.Placement) (model.Dep
 	} else if strings.TrimSpace(repo) == "" {
 		return model.Deployment{}, errors.New("repository is not set")
 	}
-	if strings.TrimSpace(p.StartCmd) == "" {
+	if p.Kind != "static" && strings.TrimSpace(p.StartCmd) == "" {
 		return model.Deployment{}, errors.New("start command is not set")
 	}
 	env, err := s.decryptEnv(p)
 	if err != nil {
 		return model.Deployment{}, fmt.Errorf("cannot decrypt environment: %w", err)
+	}
+	secretFiles, err := s.projectSecrets(p.ID)
+	if err != nil {
+		return model.Deployment{}, fmt.Errorf("cannot decrypt secret files: %w", err)
 	}
 	if p.ParentID != "" {
 		// Shared stack env is inherited; per-service values win.
@@ -500,9 +534,13 @@ func (s *Server) startDeployment(p model.Project, pl model.Placement) (model.Dep
 	_ = s.st.UpdatePlacementStatusFor(p.ID, pl.ServerID, "deploying", pl.PID, pl.Restarts, "", pl.Release)
 	req := agentproto.DeployRequest{
 		DeploymentID: dep.ID, ProjectID: p.ID, Slug: p.Slug, Name: p.Name,
-		Repo: repo, Branch: p.Branch, BuildCmd: p.BuildCmd, StartCmd: p.StartCmd,
-		HealthPath: p.HealthPath, Port: pl.Port, SourcePath: sourcePath,
-		Env: env, KeepReleases: 5, RestartPolicy: "always",
+		Kind: p.Kind, Ref: ref, Repo: repo, Branch: p.Branch, BuildCmd: p.BuildCmd, StartCmd: p.StartCmd,
+		StaticDir: p.StaticDir, HealthPath: p.HealthPath, Port: pl.Port, SourcePath: sourcePath,
+		Env: env, Secrets: secretFiles, KeepReleases: 5, RestartPolicy: "always",
+	}
+	if p.Kind == "worker" {
+		// A worker has no listener; an HTTP health path would always fail.
+		req.HealthPath = ""
 	}
 	if err := s.hub.Send(pl.ServerID, agentproto.TypeDeployRequest, req); err != nil {
 		_ = s.st.FinishDeployment(dep.ID, "failed", "", err.Error())
@@ -536,8 +574,10 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 type createServiceBody struct {
 	Name       string            `json:"name"`
 	Slug       string            `json:"slug"`
+	Kind       string            `json:"kind"`
 	BuildCmd   string            `json:"buildCmd"`
 	StartCmd   string            `json:"startCmd"`
+	StaticDir  string            `json:"staticDir"`
 	HealthPath string            `json:"healthPath"`
 	Env        map[string]string `json:"env"`
 }
@@ -545,10 +585,12 @@ type createServiceBody struct {
 type createProjectBody struct {
 	Name           string              `json:"name"`
 	Slug           string              `json:"slug"`
+	Kind           string              `json:"kind"`
 	Repo           string              `json:"repo"`
 	Branch         string              `json:"branch"`
 	BuildCmd       string              `json:"buildCmd"`
 	StartCmd       string              `json:"startCmd"`
+	StaticDir      string              `json:"staticDir"`
 	HealthPath     string              `json:"healthPath"`
 	CustomHostname string              `json:"customHostname"`
 	ServerID       string              `json:"serverId"`
@@ -570,6 +612,66 @@ func normalizeHealthPath(v string) string {
 		return "/" + v
 	}
 	return v
+}
+
+func normalizeProjectKind(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "static":
+		return "static"
+	case "worker":
+		return "worker"
+	}
+	return "app"
+}
+
+// normalizeStaticDir makes the publish directory relative to the release root.
+// Absolute paths and traversal are rejected so a project cannot publish the
+// phone's filesystem by accident.
+func normalizeStaticDir(v string) (string, error) {
+	v = strings.TrimSpace(strings.ReplaceAll(v, "\\", "/"))
+	v = strings.TrimPrefix(v, "./")
+	if v == "" || v == "." {
+		return "", nil
+	}
+	v = path.Clean(v)
+	if v == "." {
+		return "", nil
+	}
+	if path.IsAbs(v) || v == ".." || strings.HasPrefix(v, "../") {
+		return "", errors.New("static directory must be a relative path inside the release")
+	}
+	return v, nil
+}
+
+func projectHasSource(p model.Project) bool {
+	return p.SourceType == "upload" || strings.TrimSpace(p.Repo) != ""
+}
+
+// projectDeployable reports whether a project has enough configuration to
+// deploy. Static sites have no start command; workers have no listener.
+func projectDeployable(p model.Project) bool {
+	if !projectHasSource(p) {
+		return false
+	}
+	return p.Kind == "static" || strings.TrimSpace(p.StartCmd) != ""
+}
+
+// normalizeDeployRef accepts a branch, tag or commit SHA. Git refs are passed
+// as an argv element, not through a shell, but reject obvious traversal and
+// option-like values anyway.
+func normalizeDeployRef(v string) (string, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", nil
+	}
+	if !deployRefPattern.MatchString(v) ||
+		strings.Contains(v, "..") ||
+		strings.Contains(v, "//") ||
+		strings.HasSuffix(v, "/") ||
+		strings.HasSuffix(v, ".lock") {
+		return "", errors.New("ref must be a branch, tag or commit SHA")
+	}
+	return v, nil
 }
 
 func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
@@ -603,19 +705,32 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 400, fmt.Errorf("slug %q is reserved", base))
 		return
 	}
+	kind := normalizeProjectKind(body.Kind)
+	staticDir, err := normalizeStaticDir(body.StaticDir)
+	if err != nil {
+		apiErr(w, 400, err)
+		return
+	}
 	slug, err := s.uniqueSlug(base)
 	if err != nil {
 		apiErr(w, 400, err)
 		return
 	}
-	hostname := slug + "." + s.appSuffix()
-	if s.hostnameTaken(hostname) {
-		apiErr(w, 409, fmt.Errorf("hostname %s is already in use", hostname))
-		return
-	}
-	customHostname, err := s.normalizeCustomHostname(body.CustomHostname, "")
-	if err != nil {
-		apiErr(w, 400, err)
+	hostname := ""
+	customHostname := ""
+	if kind != "worker" {
+		hostname = slug + "." + s.appSuffix()
+		if s.hostnameTaken(hostname) {
+			apiErr(w, 409, fmt.Errorf("hostname %s is already in use", hostname))
+			return
+		}
+		customHostname, err = s.normalizeCustomHostname(body.CustomHostname, "")
+		if err != nil {
+			apiErr(w, 400, err)
+			return
+		}
+	} else if strings.TrimSpace(body.CustomHostname) != "" {
+		apiErr(w, 400, errors.New("a worker has no hostname; custom domains apply to web and static projects"))
 		return
 	}
 
@@ -681,12 +796,17 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		repo = ""
 	}
 
+	startCmd := strings.TrimSpace(body.StartCmd)
+	if kind == "static" {
+		// A static site is served by the agent, not by a user process.
+		startCmd = ""
+	}
 	p := model.Project{
 		ID: uuid.NewString(), Name: name, Slug: slug, Repo: repo,
 		Branch: branch, Runtime: "auto", BuildCmd: strings.TrimSpace(body.BuildCmd),
-		StartCmd: strings.TrimSpace(body.StartCmd), HealthPath: healthPath, Hostname: hostname,
-		CustomHostname: customHostname,
-		Selector:       placement.FormatSelector(sel), Replicas: replicas, PinnedServer: pinned,
+		StartCmd: startCmd, StaticDir: staticDir, HealthPath: healthPath, Hostname: hostname,
+		CustomHostname: customHostname, Kind: kind,
+		Selector: placement.FormatSelector(sel), Replicas: replicas, PinnedServer: pinned,
 		SourceType: srcType, EnvEnc: envEnc, CreatedAt: time.Now().Unix(),
 	}
 	if err := s.st.CreateProject(p); err != nil {
@@ -789,8 +909,16 @@ func (s *Server) handleCreateStack(w http.ResponseWriter, body createProjectBody
 			fail(400, fmt.Errorf("service %d needs a name", i+1))
 			return
 		}
+		svcKind := normalizeProjectKind(svc.Kind)
+		svcStaticDir, err := normalizeStaticDir(svc.StaticDir)
+		if err != nil {
+			fail(400, fmt.Errorf("service %s: %w", svcName, err))
+			return
+		}
 		startCmd := strings.TrimSpace(svc.StartCmd)
-		if startCmd == "" {
+		if svcKind == "static" {
+			startCmd = ""
+		} else if startCmd == "" {
 			fail(400, fmt.Errorf("service %s needs a start command", svcName))
 			return
 		}
@@ -814,10 +942,13 @@ func (s *Server) handleCreateStack(w http.ResponseWriter, body createProjectBody
 			fail(409, fmt.Errorf("subdomain %s is already in use", svcSlug))
 			return
 		}
-		hostname := svcSlug + "." + s.appSuffix()
-		if s.hostnameTaken(hostname) {
-			fail(409, fmt.Errorf("hostname %s is already in use", hostname))
-			return
+		hostname := ""
+		if svcKind != "worker" {
+			hostname = svcSlug + "." + s.appSuffix()
+			if s.hostnameTaken(hostname) {
+				fail(409, fmt.Errorf("hostname %s is already in use", hostname))
+				return
+			}
 		}
 		svcEnvEnc, err := s.encryptEnv(svc.Env)
 		if err != nil {
@@ -827,9 +958,9 @@ func (s *Server) handleCreateStack(w http.ResponseWriter, body createProjectBody
 		child := model.Project{
 			ID: uuid.NewString(), Name: svcName, Slug: svcSlug, Repo: repo, Branch: branch,
 			Runtime: "auto", BuildCmd: strings.TrimSpace(svc.BuildCmd), StartCmd: startCmd,
-			HealthPath: normalizeHealthPath(svc.HealthPath), Hostname: hostname, Selector: "",
+			StaticDir: svcStaticDir, HealthPath: normalizeHealthPath(svc.HealthPath), Hostname: hostname, Selector: "",
 			Replicas: 1, PinnedServer: pinned, SourceType: srcType, ParentID: parent.ID,
-			Kind: "app", StackOrder: i, EnvEnc: svcEnvEnc, CreatedAt: now,
+			Kind: svcKind, StackOrder: i, EnvEnc: svcEnvEnc, CreatedAt: now,
 		}
 		if err := s.st.CreateProject(child); err != nil {
 			fail(500, err)
@@ -875,17 +1006,21 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name           *string            `json:"name"`
-		Repo           *string            `json:"repo"`
-		Branch         *string            `json:"branch"`
-		BuildCmd       *string            `json:"buildCmd"`
-		StartCmd       *string            `json:"startCmd"`
-		HealthPath     *string            `json:"healthPath"`
-		CustomHostname *string            `json:"customHostname"`
-		Env            *map[string]string `json:"env"`
-		Selector       *string            `json:"selector"`
-		Replicas       *int               `json:"replicas"`
-		PinnedServer   *string            `json:"pinnedServer"`
+		Name              *string            `json:"name"`
+		Repo              *string            `json:"repo"`
+		Branch            *string            `json:"branch"`
+		BuildCmd          *string            `json:"buildCmd"`
+		StartCmd          *string            `json:"startCmd"`
+		StaticDir         *string            `json:"staticDir"`
+		HealthPath        *string            `json:"healthPath"`
+		BasicAuthUser     *string            `json:"basicAuthUser"`
+		BasicAuthPassword *string            `json:"basicAuthPassword"`
+		ClearBasicAuth    *bool              `json:"clearBasicAuth"`
+		CustomHostname    *string            `json:"customHostname"`
+		Env               *map[string]string `json:"env"`
+		Selector          *string            `json:"selector"`
+		Replicas          *int               `json:"replicas"`
+		PinnedServer      *string            `json:"pinnedServer"`
 	}
 	if err := readJSON(r, &body, 1<<20); err != nil {
 		apiErr(w, 400, err)
@@ -905,6 +1040,36 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.StartCmd != nil {
 		p.StartCmd = strings.TrimSpace(*body.StartCmd)
+		if p.Kind == "static" {
+			p.StartCmd = ""
+		}
+	}
+	if body.StaticDir != nil {
+		v, err := normalizeStaticDir(*body.StaticDir)
+		if err != nil {
+			apiErr(w, 400, err)
+			return
+		}
+		p.StaticDir = v
+	}
+	if body.ClearBasicAuth != nil && *body.ClearBasicAuth {
+		p.BasicAuthUser = ""
+		p.BasicAuthHash = ""
+	}
+	if body.BasicAuthUser != nil {
+		p.BasicAuthUser = strings.TrimSpace(*body.BasicAuthUser)
+	}
+	if body.BasicAuthPassword != nil && *body.BasicAuthPassword != "" {
+		hash, err := auth.HashPassword(*body.BasicAuthPassword)
+		if err != nil {
+			apiErr(w, 400, fmt.Errorf("basic auth: %w", err))
+			return
+		}
+		p.BasicAuthHash = hash
+	}
+	if (p.BasicAuthUser == "") != (p.BasicAuthHash == "") {
+		apiErr(w, 400, errors.New("basic auth needs both a username and a password"))
+		return
 	}
 	if body.HealthPath != nil {
 		hp := strings.TrimSpace(*body.HealthPath)
@@ -919,6 +1084,10 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 	if body.CustomHostname != nil {
 		if p.Kind == "stack" && strings.TrimSpace(*body.CustomHostname) != "" {
 			apiErr(w, 400, errors.New("set a custom domain on a service, not on the stack"))
+			return
+		}
+		if p.Kind == "worker" && strings.TrimSpace(*body.CustomHostname) != "" {
+			apiErr(w, 400, errors.New("a worker has no hostname"))
 			return
 		}
 		norm, err := s.normalizeCustomHostname(*body.CustomHostname, p.ID)
@@ -976,6 +1145,15 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.st.AddEvent("ui", "project.update", p.ID, p.Name)
 	s.triggerReconcile()
+	if p.Kind == "stack" {
+		if children, err := s.st.ListChildProjects(p.ID); err == nil {
+			for _, child := range children {
+				go s.syncTasksForProject(child.ID)
+			}
+		}
+	} else {
+		go s.syncTasksForProject(p.ID)
+	}
 	writeJSON(w, 200, map[string]any{"project": s.buildProjectView(p, true)})
 }
 
@@ -1078,9 +1256,16 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 			targets = append(targets, children...)
 		}
 	}
+	taskServers := map[string]bool{}
 	for _, target := range targets {
+		if tasks, err := s.st.ListTasksForProject(target.ID); err == nil {
+			for _, task := range tasks {
+				taskServers[task.ServerID] = true
+			}
+		}
 		placements, _ := s.st.ListProjectPlacements(target.ID)
 		for _, pl := range placements {
+			taskServers[pl.ServerID] = true
 			if !s.hub.Online(pl.ServerID) {
 				continue
 			}
@@ -1108,6 +1293,9 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = os.Remove(s.sourceBundlePath(p.ID))
 	_ = s.st.AddEvent("ui", "project.delete", p.ID, p.Name)
+	for serverID := range taskServers {
+		go s.syncTasksForServer(serverID)
+	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
@@ -1124,8 +1312,27 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 404, err)
 		return
 	}
+	ref := ""
+	if r.ContentLength != 0 {
+		var body struct {
+			Ref string `json:"ref"`
+		}
+		if err := readJSON(r, &body, 1<<16); err != nil {
+			apiErr(w, 400, err)
+			return
+		}
+		ref, err = normalizeDeployRef(body.Ref)
+		if err != nil {
+			apiErr(w, 400, err)
+			return
+		}
+		if ref != "" && p.SourceType != "git" {
+			apiErr(w, 400, errors.New("ref deploys need a git source"))
+			return
+		}
+	}
 	if p.Kind == "stack" {
-		s.handleDeployStack(w, p)
+		s.handleDeployStack(w, p, ref)
 		return
 	}
 	if p.SourceType == "upload" {
@@ -1143,7 +1350,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 400, errors.New("set a git repository first"))
 		return
 	}
-	if strings.TrimSpace(p.StartCmd) == "" {
+	if p.Kind != "static" && strings.TrimSpace(p.StartCmd) == "" {
 		apiErr(w, 400, errors.New("set a start command first"))
 		return
 	}
@@ -1192,7 +1399,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	results := make([]result, 0, len(placements))
 	skipped := []string{}
 	for _, pl := range placements {
-		dep, err := s.startDeployment(p, pl)
+		dep, err := s.startDeployment(p, pl, ref)
 		if err != nil {
 			if !s.hub.Online(pl.ServerID) {
 				skipped = append(skipped, pl.ServerID)
@@ -1211,7 +1418,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 202, map[string]any{"deployments": results, "skipped": skipped})
 }
 
-func (s *Server) handleDeployStack(w http.ResponseWriter, p model.Project) {
+func (s *Server) handleDeployStack(w http.ResponseWriter, p model.Project, ref string) {
 	children, err := s.st.ListChildProjects(p.ID)
 	if err != nil || len(children) == 0 {
 		apiErr(w, 409, errors.New("this stack has no services"))
@@ -1240,7 +1447,7 @@ func (s *Server) handleDeployStack(w http.ResponseWriter, p model.Project) {
 			continue
 		}
 		for _, pl := range placements {
-			dep, err := s.startDeployment(child, pl)
+			dep, err := s.startDeployment(child, pl, ref)
 			if err != nil {
 				if !s.hub.Online(pl.ServerID) {
 					skipped = append(skipped, pl.ServerID)
@@ -1497,6 +1704,9 @@ func (s *Server) onDeployEvent(serverID string, ev agentproto.DeployEvent) {
 		}
 		if isTerminalDeploy(ev.Status) {
 			s.triggerReconcile()
+			// A deploy changes the current release and possibly the env, so
+			// refresh the task snapshot for this phone.
+			go s.syncTasksForServer(serverID)
 		}
 		_ = serverID
 	}
@@ -1546,6 +1756,11 @@ func (s *Server) syncAppStatus(serverID string, app agentproto.AppStatus) {
 	}
 	if mine.Status != state || mine.PID != app.PID || mine.Restarts != app.Restarts || mine.LastError != app.LastError {
 		_ = s.st.UpdatePlacementStatusFor(p.ID, serverID, state, app.PID, app.Restarts, app.LastError, mine.Release)
+	}
+	if app.HasUsage && app.State == "running" && s.sampleAppMetric(p.ID) {
+		if err := s.st.InsertAppMetric(p.ID, serverID, time.Now().Unix(), app.CPUPercent, app.RSS); err != nil {
+			s.log.Debug("app metric", "project", p.Slug, "err", err)
+		}
 	}
 	if mine.Desired == "stopped" && app.State == "running" {
 		s.enforceStopped(serverID, p)

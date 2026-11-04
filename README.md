@@ -34,7 +34,9 @@ label, and deploy to it like any other platform.
 **Status:** deploy pipeline, fleet scheduling, stacks and the service catalogue are
 implemented. Inventory, metrics, terminal, files, git-to-phone deploys, supervised
 processes, rollback, replicas with label selectors, drain/failover, per-project subdomains,
-alerts with Telegram/webhook notifications, Cloudflare automation, Termux bootstrap and
+alerts with Telegram/webhook notifications, scheduled tasks, signed Git webhooks, commit/tag deploys,
+per-release rollback, encrypted off-site backups with restore drills, basic auth and secret files,
+fleet batch commands, audit export, edge uptime checks, Cloudflare automation, Termux bootstrap and
 on-phone data services (PostgreSQL, Redis, SQLite and S3) with relay, PC bridge, backups and
 standbys all work.
 
@@ -42,24 +44,26 @@ standbys all work.
 
 | Area | Capability |
 |---|---|
-| Fleet | Auto-registration, rename, labels, online/offline with 45 s staleness, drain mode, delete |
+| Fleet | Auto-registration, rename, labels, online/offline with 45 s staleness, drain mode, batch commands, retire/wipe, manual agent update, delete |
 | Onboarding | **Fleet → Add phone**: install over SSH using an existing `~/.ssh/config` alias, or copy a ready-made Termux command |
-| Telemetry | CPU, memory, disk, thermal zones, battery + charging, load, network counters, uptime — 5 s heartbeats, 14-day retention, downsampled charts |
+| Telemetry | CPU, memory, disk, thermal zones, battery + charging, load, network counters, uptime — 5 s heartbeats, 14-day retention, downsampled charts; per-app CPU and RSS for each project process group |
 | Operations | Browser terminal (xterm.js over the agent PTY), command runner, process list |
+| Observability | Live app-log streaming over WebSocket, per-project CPU/RSS charts, request logs with method, path, status, latency and bytes (public edge, 7-day retention) |
 | Files | Browse; upload files or whole folders (zipped in the browser and extracted on the phone); download; edit text files; mkdir, rename, delete — sandboxed to `$HOME` |
-| Projects | Git repo **or uploaded source folder** → build → release → supervised process → health check → rollback, five releases kept |
+| Projects | Git repo **or uploaded source folder** → build → release → supervised process → health check → rollback, five releases kept; **web app**, **static site** or **worker**; deploy a branch, commit or tag; signed Git webhooks; basic auth and secret files; choose any kept release to roll back; `PHLEET_DATA_DIR` keeps runtime state across deploys |
 | Services | Ready-built self-hosted apps (Filebrowser, Memos, Gotify, MicroBin, Navidrome, Syncthing) installed from a catalogue, exposed on `<slug>.<domain>`, with runtime logs and backups |
 | Stacks | One project with multiple services; each service gets its own subdomain, port, process, health check and logs, with shared repo/env and private `127.0.0.1` service URLs |
-| Addons | 19 engines — relational databases, caches, queues, search, metrics, logs, notifications, Git and backend services — installed and supervised on a phone; standalone or created with a project; injected env, relay for other phones, PC bridge, SQL console, chunked backups, standbys, manual promotion and opt-in automatic failover |
-| UI | Light theme by default, with a theme studio: Light / Dark / Match-system, 8 accent presets, custom primary and secondary colors, persisted per browser |
+| Addons | 19 engines — relational databases, caches, queues, search, metrics, logs, notifications, Git and backend services — installed and supervised on a phone; standalone or created with a project; injected env, relay for other phones, PC bridge, SQL console, soft data-usage reporting, chunked backups, encrypted off-site copies, scheduled restore drills, standbys, manual promotion and opt-in automatic failover |
+| Tasks | Cron-style recurring commands, per project or per phone; the schedule lives on the device, so runs continue while the panel is offline; run-now, logs, pause, timeout |
+| UI | Light theme by default, with a theme studio: Light / Dark / Match-system, 8 accent presets, custom primary and secondary colors, persisted per browser; installable PWA manifest |
 | Scheduling | 1-5 replicas per project, label selectors, pinned phones, health-based placement, automatic failover, manual rebalance |
 | Zero-downtime | The agent holds the public port with a loopback switchboard; a new release starts on an alternate internal port, becomes healthy, then traffic switches before the old release is drained |
 | Routing | `<slug>.<domain>` round-robins across running replicas through the agent tunnels; drained/offline replicas are skipped |
 | Env | Per-project variables, encrypted at rest with AES-256-GCM, injected into every replica |
 | Domains | Optional custom hostname per project/service; point a proxied CNAME at the tunnel and set it under Project → Settings |
-| Alerts | Offline, temperature, battery, disk, crash-loop, failed-deploy and database alerts; thresholds, ack, history, Telegram and webhook notifications |
+| Alerts | Offline, temperature, battery, disk, crash-loop, failed-deploy, uptime and database alerts; thresholds, ack, history, Telegram, webhook, ntfy, Gotify, Discord, Slack and email notifications; quiet hours and maintenance windows |
 | Audit log | Cursor-paginated events (25–200 per page), action filter, search across action/target/detail, live refresh |
-| Edge | `phleet setup-cloudflare` creates the tunnel, wildcard DNS, ingress and the Windows service; config reloads every 15 s |
+| Edge | `phleet setup-cloudflare` creates the tunnel, wildcard DNS, ingress and the Windows service; config reloads every 15 s; custom-domain CNAMEs can be created from the project settings |
 | Security | Signed session cookies, constant-time token checks, agent bearer auth, host-header guard, path sandbox with symlink resolution, panel cookies stripped from app traffic |
 
 ## Requirements
@@ -68,9 +72,9 @@ standbys all work.
 - Go 1.27+ and Node 20+ to build (the Linux/arm64 agent is still built with Go 1.22 for Android 10 compatibility)
 - A domain on Cloudflare (free plan is fine) for public access
 - `cloudflared` installed if you want the service auto-installed
-- Phones with [Termux](https://f-droid.org/packages/com.termux/) (F-Droid build, not the Play Store one)
+- Phones with [Termux](https://f-droid.org/packages/com.termux/) (F-Droid build, not the Play Store one), on arm64 or armv7
 - Optional: `postgresql`, `redis`, `sqlite` and `rclone` Termux packages (installed on demand, or up front with the
-  bootstrap's `--with` flag)
+  bootstrap's `--with` flag); rclone on the control-plane host for off-site backups
 
 ## Quickstart
 
@@ -186,7 +190,8 @@ Builds inherit the runtime environment, including `NODE_ENV=production`. Pass `-
 
 Deploying runs entirely on the phone: download/clone → build → start the new release on an alternate internal port →
 health check → switch the public-port switchboard → symlink `current` → drain and stop the old release → keep five
-releases. The public port never closes, so new HTTP/WebSocket connections go to the healthy release. Existing
+releases. The deploy plan may carry a branch, tag or commit ref; a commit that is not the branch tip is fetched with
+`git fetch --depth 1 origin <sha>`. The public port never closes, so new HTTP/WebSocket connections go to the healthy release. Existing
 long-lived connections on the old release get a 30-second drain. If the new release fails its check, the old release
 keeps serving and the deployment is marked `rolled_back`. The first deploy after upgrading from an older agent briefly
 restarts the app once to move it behind the switchboard. A phone that reboots re-supervises its apps from
@@ -195,11 +200,13 @@ restarts the app once to move it behind the switchboard. A phone that reboots re
 Uploaded projects can replace their source later under **Project → Settings → Source** (upload a new folder, then
 Deploy). Source archives are capped at 64 MB; empty directories are not preserved.
 
-A single project is **one supervised process listening on one port behind one hostname**. If a repository contains a UI,
+A single project is **one workload** — a web app, a static site, or a worker. If a repository contains a UI,
 an API and a worker, use a **multi-service stack** so the UI still treats them as one project:
 
 - One stack owns the shared repo, branch, build source and encrypted environment.
-- Each service has its own **subdomain**, port, process, health check, releases and logs.
+- Each service has its own **subdomain**, port, process, health check, releases and logs. Set its
+**kind** to web app, static site or worker; static services serve a directory from the release and
+workers run with no port or hostname.
 - Pin the stack to one phone so services can reach each other over `127.0.0.1`.
 - `PHLEET_SERVICE_<SLUG>_URL` is injected into every service on that phone, e.g.
   `PHLEET_SERVICE_API_URL=http://127.0.0.1:4102`.
@@ -215,9 +222,94 @@ stack pins every service to one phone, which is exactly what a loopback database
 owns, then deletes them and their data (a database also attached to another project is kept). Back up anything you
 need before confirming.
 
-The app receives `PORT`, `HOST=0.0.0.0`, `NODE_ENV=production`, `PHLEET_APP` and your variables. Its URL is
-`<slug>.<domain>` once Cloudflare is configured, or `<slug>.localhost` for local use (Chrome resolves any
-`*.localhost` to loopback).
+### Project kinds
+
+A project is one of three workloads:
+
+| Kind | What runs | URL / port | Health check |
+|---|---|---|---|
+| **Web app** | One supervised process | `<slug>.<domain>` on an allocated port | HTTP path or TCP |
+| **Static site** | An agent-owned file server; no runtime on the phone | `<slug>.<domain>` on an allocated port | HTTP GET (default `/`) |
+| **Worker** | One supervised process with no listener | no hostname, no port | process alive after startup |
+
+**Static site.** Set a build command if the source needs one, then point **Static directory** at the
+output (for example `dist`; blank serves the repository root). The agent serves the release directory
+with directory indexes, byte ranges and SPA fallback: a missing extensionless route returns
+`index.html`, while missing assets return 404. Dotfiles (`.git`, `.env`, `.ssh`) and symlinks that
+leave the release are never served. Deploys are blue-green like web apps.
+
+**Worker.** Use it for queue consumers, scheduled work and background jobs. Workers receive
+`NODE_ENV=production`, `PHLEET_APP`, `PHLEET_WORKER=1` and `PHLEET_DATA_DIR`, but no `PORT` and no
+`HOST`. A worker that exits during the deploy's startup window fails the release and rolls back;
+after that the supervisor restarts it with the usual backoff.
+
+A multi-service stack can mix kinds: a web service, a static frontend and a worker in one repository.
+Every service still gets its own release, logs and `PHLEET_DATA_DIR`.
+
+### Deploying a commit, tag or webhook
+
+The deploy endpoint accepts a ref. Leave it out to deploy the configured branch; pass a branch, tag
+or commit SHA to deploy exactly that:
+
+```bash
+curl -fsS -X POST "$PHLEET_URL/api/projects/$PROJECT_ID/deploy" \
+  -H "Authorization: Bearer $PHLEET_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"ref":"v1.2.3"}'
+```
+
+The phone clones the ref shallowly. For a commit that is not the branch tip it fetches that one
+commit; the deployment history records the resulting SHA.
+
+**Git webhooks.** Open **Project → Settings → Webhooks** (or the webhook card on a stack) and
+generate a secret. phleet shows a GitHub and a GitLab URL:
+
+- GitHub: `POST /hooks/github/<project-id>` with `X-Hub-Signature-256` (HMAC-SHA256 of the raw body).
+- GitLab: `POST /hooks/gitlab/<project-id>` with `X-Gitlab-Token`.
+
+A push to the project branch deploys the pushed commit; other branches are ignored with `202`. A
+stack push deploys every service at the same commit. The secret is encrypted at rest and can be
+rotated at any time. Add `/hooks/*` to the Cloudflare Access bypass, because webhooks cannot carry
+an Access session.
+
+### Rolling back a release
+
+Each phone keeps the last five releases. **Project → Deployments → Releases** lists them per
+phone; choose one and phleet restarts it, health-checks it, then switches traffic. The release that
+was running is kept, so another rollback can undo this one. The original **Rollback** button still
+moves every replica to its previous release.
+
+### Observability
+
+- **Live logs.** The project **Logs** tab opens a WebSocket. The control plane tails the phone's
+  `app.log` once a second using byte offsets, so only new output travels and the browser follows the
+  file without polling the REST API. A rotation resets the client with a clear marker. The same tab
+  still shows the path, size and a "tail only" badge for the initial 64 KB.
+- **Per-app resources.** Every heartbeat includes CPU and RSS for the app's whole process group
+  (the shell, the runtime and any children), read from `/proc`. The project overview charts the last
+  hour, downsampled like host metrics, and keeps 14 days. Static sites have no process and show a note
+  instead. This works as an ordinary Termux user: the agent only reads its own processes.
+- **Request logs.** Every HTTP request routed to a project through the public edge is recorded with
+  method, path, status, bytes, duration, host and client IP. The **Requests** tab shows the last 24
+  hours, newest first, and keeps 7 days. Only edge traffic is recorded: LAN/direct requests and
+  WebSocket sessions are not. Request logs are admin-only because paths can contain tokens.
+
+The app receives `PORT`, `HOST=127.0.0.1`, `NODE_ENV=production`, `PHLEET_APP`, `PHLEET_PORT`,
+`PHLEET_DATA_DIR` and your variables. Its URL is `<slug>.<domain>` once Cloudflare is configured, or
+`<slug>.localhost` for local use (Chrome resolves any `*.localhost` to loopback).
+
+`PHLEET_DATA_DIR` is a persistent directory (`~/apps/<slug>/shared/data`) outside the release tree.
+Anything written into the release directory disappears when that release is pruned, so put uploads,
+SQLite files and other runtime state under `PHLEET_DATA_DIR`. It survives deploys, rollbacks,
+restarts and phone reboots, and is visible in **Server → Files**. Secret files live next to it under
+`~/apps/<slug>/shared/secrets` and are exposed as `PHLEET_SECRETS_DIR`.
+
+Deploys are refused when the target phone is at 70 °C or hotter, or below 10 % battery while not
+charging. This keeps a hot or nearly empty phone from starting a build it cannot finish.
+
+Deleting a project stops its process but keeps `~/apps/<slug>` on the phone, including
+`shared/data`, so a mistaken delete does not destroy uploads. Remove the directory from
+**Server → Files** when you no longer need it.
 
 ### Multi-service stacks
 
@@ -385,6 +477,53 @@ published through the normal wildcard tunnel.
 > sustained writes wear eMMC. Take backups before you need them, and do not put a database on a phone you cannot
 > physically reach.
 
+### Off-site backups and restore drills
+
+Backups are encrypted on the control plane before they are stored. **Settings → Backups** can copy
+each completed encrypted dump to an [rclone](https://rclone.org/) remote:
+
+- Install rclone on the control-plane host and configure the remote with `rclone config`.
+- Set the target (for example `b2:my-bucket/phleet`) and optionally the rclone executable path.
+- **Test connection** writes and deletes a small object.
+- **Upload existing** copies complete backups taken before off-site was enabled.
+
+The encrypted dump and a JSON metadata sidecar are uploaded; a badge on each backup shows
+off-site/uploading/failed. If the local copy is ever missing, verify, download and restore fetch it
+back from the remote automatically. Pruned backups and addon deletion remove the remote copies too.
+The remote only ever sees the encrypted file and non-secret metadata.
+
+**Scheduled restore drills** download the latest backup, verify its checksum, and run the
+engine-native integrity check (`pg_restore --list`, `redis-check-rdb`, SQLite `quick_check`, archive
+listing). They never touch the live data directory. Enable them in **Settings → Backups** with an
+interval; run one on demand from **Addons → Backups → Run drill**. Each result is recorded per addon
+and pruned after 90 days.
+
+> A drill proves the backup is complete, decryptable and structurally readable. It is not a full
+> restore into a scratch database; keep the two-phone rehearsal and an occasional manual restore in
+> your routine.
+
+**Data usage.** The addon overview runs `du -sm` on the phone and shows the current data size against
+the optional size hint. Crossing the hint is advisory only (nothing is deleted or blocked): it raises
+a warning alert, or a critical one at twice the hint, and resolves automatically when usage drops. The
+control plane rechecks configured hints every 30 minutes.
+
+### Basic auth and secret files
+
+- **Basic auth** on a project is enforced at the public proxy before any traffic reaches the phone.
+  Set a username and password under **Project → Settings**; the password is stored as a PBKDF2 hash.
+  Removing it restores public access immediately.
+- **Secret files** are encrypted at rest, written to `$PHLEET_SECRETS_DIR` on the phone at deploy
+  time (mode 0600) and removed on the next deploy when deleted. Use them for service-account JSON,
+  TLS keys and other files an app expects on disk. Contents are never shown again after saving.
+
+### Fleet commands and retirement
+
+- The Fleet page has a **Fleet commands** panel: select phones (or none for every online phone),
+  run a shell command and read each result, or ask every agent to check for an update.
+- **Server → Settings → Check for update** triggers the signed update check immediately.
+- **Retire / wipe phone** stops its apps, deletes its scheduled tasks and removes it from the panel.
+  Enabling the second option also deletes its databases/services, backups and off-site copies.
+
 ### Replicas, labels and failover
 
 Run more than one copy of a project and let the scheduler spread them:
@@ -417,11 +556,41 @@ The control plane evaluates every 30 seconds:
 | Disk almost full | ≥ 90 % used (critical at 95 %) |
 | App crash-looping | placement status `crashed` |
 | Database unhealthy | addon status `failed` (critical) or `unreachable` (warning) |
+| Addon over size hint | data usage above the advisory limit (warning; critical at 2×) |
 | Deploy failed | latest deployment `failed` |
 
 Alerts open once, update in place, can be acknowledged, and resolve automatically. Configure thresholds and
 Telegram/webhook notifications under **Alerts → Rules & notifications**; the test button sends a message immediately.
 No notification credentials? Alerts still appear in the panel and the sidebar badge.
+
+Notifications can go to Telegram, a generic webhook, ntfy, Gotify, Discord, Slack and SMTP email at
+the same time. **Quiet hours** suppress external messages while alerts still open in the panel, and a
+**maintenance window** silences every channel until a chosen time. The test button deliberately
+bypasses both. Each channel is independent; leave it blank to disable it.
+
+### Scheduled tasks
+
+**Tasks** runs a command on a cron schedule, either inside a project or on the phone itself:
+
+| Target | Working directory | Environment |
+|---|---|---|
+| **Project** | `~/apps/<slug>/current` (the active release) | project/stack env, addon credentials, `PHLEET_DATA_DIR` |
+| **Phone** | `$HOME` | the agent environment, with agent tokens stripped |
+
+- Five-field cron (`minute hour day month weekday`), with names (`mon`, `jan`), ranges, lists,
+  steps and `@hourly`/`@daily`/`@weekly`/`@monthly`/`@yearly`. Times use the phone's local clock.
+- The **schedule lives on the phone**. On create, update or reconnect the control plane sends the
+  full schedule; the agent persists it in `~/.phleet/tasks.json` and runs it even if the panel is
+  down. Missed minutes are not replayed after a reboot.
+- **Run now** starts a run immediately; the panel shows `running`, then `ok`, `failed`, `interrupted`
+  or the exit code. A task never overlaps itself.
+- Output is capped per run, rotated at 1 MB under `~/apps/<slug>/logs/task-<id>.log` (or
+  `~/.phleet/logs/` for phone tasks) and available from **Tasks → logs**. The last 16 KB also travels
+  with the run event, so the panel has output while the phone is offline.
+- Project tasks are pinned to the selected phone. If the project moves, the task is removed from
+  the old phone and shown as unavailable; pick the new phone in the task.
+- Tasks run as the Termux user. That is not a sandbox: a task can read the same `$HOME` as the app,
+  including `~/.phleet/agent.token`, so only give task access to people who already have admin.
 
 ## Using it
 
@@ -432,14 +601,18 @@ No notification credentials? Alerts still appear in the panel and the sidebar ba
 - **Server → Processes** — top processes by RSS, filterable.
 - **Server → Overview** — system facts, detected toolchain, labels, run-once command box.
 - **Server → Settings** — rename, edit labels, drain/resume, remove the device.
-- **Projects** - deploy, watch live build logs, tail app logs per replica, restart/stop/start, roll back, edit env,
-  change replicas/selectors, rebalance, attach a database.
-- **Stacks** - one project with several services, each with its own subdomain, port and health check.
+- **Projects** - deploy a web app, static site or worker; stream app logs live, watch per-app CPU/RSS,
+  inspect request logs, restart/stop/start, roll back, edit env, change replicas/selectors, rebalance,
+  attach a database.
+- **Stacks** - one project with several services, each with its own subdomain, port and health check;
+  services can be web apps, static sites or workers.
 - **Services** - install Filebrowser, Memos, Gotify, MicroBin, Navidrome, Syncthing, Vikunja or Miniflux from the
   catalogue, then open its URL, logs and backups.
 - **Addons** - create PostgreSQL/Redis/SQLite/S3, open the console, use the PC bridge, add a standby and promote it,
   take/restore backups, read provisioning logs.
 - **Alerts** — active alerts, history, thresholds and notification channels.
+- **Tasks** — create cron tasks for a project or a phone, run them now, pause them and read the
+  last run's output.
 - **Theme** — light by default. The sidebar palette button and **Settings → Appearance** open the theme studio:
   Light / Dark / Match system, eight accent presets, and custom primary/secondary colors. The choice is remembered
   per browser.
@@ -447,7 +620,7 @@ No notification credentials? Alerts still appear in the panel and the sidebar ba
 ## Security notes
 
 - The panel binds to `127.0.0.1` by default; only cloudflared reaches it.
-- Put **Cloudflare Access** in front of `fleet.example.com` (Zero Trust → Access → Applications), with a path bypass for `/agent` and `/agent/data` so phones can connect.
+- Put **Cloudflare Access** in front of `fleet.example.com` (Zero Trust → Access → Applications), with a path bypass for `/agent`, `/agent/data` and `/hooks/*` so phones and Git providers can connect.
 - The shared fleet token is now an **enrollment token**. On the first hello the control plane issues a random per-device token, stores only its SHA-256 hash, and overwrites the phone's `agent.token`. Later control and data connections must present that device token; the shared token cannot re-enroll an existing phone. The device token is never accepted by the panel API.
 - The agent token lives in `~/.phleet/agent.token` (mode `0600`) and is passed with `--token-file`, not in the process command line. Apps and services run as the same Termux user, so a leaked device token still lets its holder act as that phone; per-device isolation is only as strong as the phone's OS sandbox.
 - Re-running the bootstrap on an already-enrolled phone is rejected until you delete the phone in **Fleet → Server → Settings** (or keep its existing `agent.token`). This prevents the shared enrollment token from taking over an existing device.
@@ -460,7 +633,7 @@ No notification credentials? Alerts still appear in the panel and the sidebar ba
 - On Windows, `phleetd` applies an ACL to its data directory (SYSTEM, Administrators and the account running phleetd) because Go's `0600` mode does not restrict Windows users.
 - The file API is confined to `$HOME` (plus `--root` directories you pass explicitly) and resolves symlinks before every check.
 - Panel tokens never leave the host through the API, and the session cookie, `Authorization` and `X-Phleet-Token` headers are stripped before requests are proxied to project apps.
-- Project environment variables are encrypted at rest with AES-256-GCM using a key derived from the control plane secret.
+- Project environment variables are encrypted at rest with AES-256-GCM using a key derived from the control plane secret. Git webhook secrets use the same encryption; GitHub requests are verified with an HMAC and GitLab with the provider token, both in constant time.
 - The PC database bridge binds `127.0.0.1` by default. `-bridge-lan` exposes it on the LAN; the engine still
   requires its generated password, but treat it as a deliberate opt-in.
 - Addon relays are per addon and per phone. An agent can only open a relay for an addon the control plane explicitly
@@ -514,6 +687,11 @@ curl -H "Authorization: Bearer $env:PHLEET_ADMIN" http://127.0.0.1:8080/metrics
 # control plane with verbose logs
 .\dist\phleetd.exe -addr 127.0.0.1:8080 -debug
 
+# operator CLI against the running control plane
+.\dist\phleet.exe deploy -project <id> -ref v1.2.3 -wait
+.\dist\phleet.exe logs -project <id>
+.\dist\phleet.exe exec -server <id> -command "uptime"
+
 # UI dev server (proxies /api and websockets to :8080)
 cd web; npm run dev
 ```
@@ -563,6 +741,7 @@ internal/httpapi     REST + WebSocket API, auth, host guard, project router
 internal/store       SQLite schema and queries
 internal/tunnel      yamux-over-WebSocket + HTTP proxying
 internal/engines     shared addon + service catalogue (commands, env, backups)
+internal/cron        cron parser shared by the panel and the agent
 internal/secrets     AES-GCM for project env and addon credentials
 internal/cloudflare  API client + persisted tunnel config
 internal/webui       embedded React build
@@ -572,13 +751,14 @@ deploy/windows/      scheduled task installer
 docs/runbooks/       database failover procedure
 ```
 
-See [docs/architecture.md](docs/architecture.md) for the protocol, failure model and deploy design, and
-[docs/ci-cd.md](docs/ci-cd.md) for triggering deploys from GitHub Actions, GitLab CI or any other CI system with a
-scoped `deployer` token.
+See [docs/architecture.md](docs/architecture.md) for the protocol, failure model and deploy design,
+[docs/ci-cd.md](docs/ci-cd.md) for triggering deploys from GitHub Actions, GitLab CI or any other CI
+system with a scoped `deployer` token, and [docs/openapi.yaml](docs/openapi.yaml) for the HTTP API
+surface.
 
 ## Roadmap
 
-1. **Addons** — S3 bucket mirroring between two phones, automatic promotion with a quorum/witness, per-addon quotas.
-2. **Scale** — custom domains, build caching, scheduled jobs.
-3. **Security** — per-device tokens, API tokens and RBAC, audit export.
-4. **Ops** — restore drills, batch commands, mobile polish.
+1. **Data safety** — enforced per-addon quotas, S3 bucket mirroring, quorum/witness promotion.
+2. **Observability** — live log streaming, per-app CPU/RAM and request logs.
+3. **Delivery** — preview environments per branch.
+4. **Operations** — batch fleet commands, phone retire/wipe, audit export, per-project RBAC, SSO.

@@ -42,6 +42,36 @@ type Sample struct {
 	TS int64 `json:"ts"`
 }
 
+// AppSample is one per-project resource sample (the whole process group).
+type AppSample struct {
+	TS         int64   `json:"ts"`
+	CPUPercent float64 `json:"cpuPercent"`
+	RSS        int64   `json:"rss"`
+}
+
+// RequestLog is one request routed to a project through the public edge.
+type RequestLog struct {
+	ID         int64  `json:"id"`
+	ProjectID  string `json:"projectId"`
+	ServerID   string `json:"serverId"`
+	TS         int64  `json:"ts"`
+	Method     string `json:"method"`
+	Path       string `json:"path"`
+	Status     int    `json:"status"`
+	Bytes      int64  `json:"bytes"`
+	DurationMS int64  `json:"durationMs"`
+	Host       string `json:"host"`
+	IP         string `json:"ip"`
+}
+
+type UptimeStatus struct {
+	ProjectID  string `json:"projectId"`
+	CheckedAt  int64  `json:"checkedAt"`
+	OK         bool   `json:"ok"`
+	StatusCode int    `json:"statusCode"`
+	Error      string `json:"error,omitempty"`
+}
+
 type Event struct {
 	ID     int64  `json:"id"`
 	TS     int64  `json:"ts"`
@@ -52,28 +82,32 @@ type Event struct {
 }
 
 type Project struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	Slug            string `json:"slug"`
-	Repo            string `json:"repo"`
-	Branch          string `json:"branch"`
-	Runtime         string `json:"runtime"`
-	BuildCmd        string `json:"buildCmd"`
-	StartCmd        string `json:"startCmd"`
-	HealthPath      string `json:"healthPath"`
-	Hostname        string `json:"hostname"`
-	CustomHostname  string `json:"customHostname,omitempty"`
-	Selector        string `json:"selector"`
-	Replicas        int    `json:"replicas"`
-	PinnedServer    string `json:"pinnedServer"`
-	SourceType      string `json:"sourceType"`
-	SourceSize      int64  `json:"sourceSize"`
-	SourceUpdatedAt int64  `json:"sourceUpdatedAt"`
-	ParentID        string `json:"parentId,omitempty"`
-	Kind            string `json:"kind"`
-	StackOrder      int    `json:"stackOrder,omitempty"`
-	EnvEnc          string `json:"-"`
-	CreatedAt       int64  `json:"createdAt"`
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	Slug             string `json:"slug"`
+	Repo             string `json:"repo"`
+	Branch           string `json:"branch"`
+	Runtime          string `json:"runtime"`
+	BuildCmd         string `json:"buildCmd"`
+	StartCmd         string `json:"startCmd"`
+	HealthPath       string `json:"healthPath"`
+	StaticDir        string `json:"staticDir,omitempty"`
+	Hostname         string `json:"hostname"`
+	CustomHostname   string `json:"customHostname,omitempty"`
+	Selector         string `json:"selector"`
+	Replicas         int    `json:"replicas"`
+	PinnedServer     string `json:"pinnedServer"`
+	SourceType       string `json:"sourceType"`
+	SourceSize       int64  `json:"sourceSize"`
+	SourceUpdatedAt  int64  `json:"sourceUpdatedAt"`
+	BasicAuthUser    string `json:"basicAuthUser,omitempty"`
+	BasicAuthHash    string `json:"-"`
+	ParentID         string `json:"parentId,omitempty"`
+	Kind             string `json:"kind"`
+	StackOrder       int    `json:"stackOrder,omitempty"`
+	WebhookSecretEnc string `json:"-"`
+	EnvEnc           string `json:"-"`
+	CreatedAt        int64  `json:"createdAt"`
 }
 
 // Placement is where a project runs. One per project in phase 2.
@@ -137,6 +171,8 @@ type Addon struct {
 	Service          bool   `json:"service"`
 	AppID            string `json:"appId,omitempty"`
 	Version          string `json:"version,omitempty"`
+	DataUsedMB       int64  `json:"dataUsedMb,omitempty"`
+	UsageCheckedAt   int64  `json:"usageCheckedAt,omitempty"`
 	CreatedAt        int64  `json:"createdAt"`
 	UpdatedAt        int64  `json:"updatedAt"`
 }
@@ -174,18 +210,47 @@ type AddonBinding struct {
 }
 
 type Backup struct {
+	ID           string `json:"id"`
+	AddonID      string `json:"addonId"`
+	ServerID     string `json:"serverId"`
+	Kind         string `json:"kind"`
+	Status       string `json:"status"`
+	Size         int64  `json:"size"`
+	Checksum     string `json:"checksum,omitempty"`
+	Encrypted    bool   `json:"encrypted,omitempty"`
+	Path         string `json:"-"`
+	RemoteStatus string `json:"remoteStatus,omitempty"`
+	RemoteKey    string `json:"remoteKey,omitempty"`
+	RemoteError  string `json:"remoteError,omitempty"`
+	RemoteAt     int64  `json:"remoteAt,omitempty"`
+	Error        string `json:"error,omitempty"`
+	CreatedAt    int64  `json:"createdAt"`
+	FinishedAt   int64  `json:"finishedAt"`
+}
+
+// RestoreDrill is a non-destructive restore-readiness check of one backup.
+type RestoreDrill struct {
 	ID         string `json:"id"`
 	AddonID    string `json:"addonId"`
-	ServerID   string `json:"serverId"`
-	Kind       string `json:"kind"`
+	BackupID   string `json:"backupId"`
 	Status     string `json:"status"`
-	Size       int64  `json:"size"`
-	Checksum   string `json:"checksum,omitempty"`
-	Encrypted  bool   `json:"encrypted,omitempty"`
-	Path       string `json:"-"`
-	Error      string `json:"error,omitempty"`
-	CreatedAt  int64  `json:"createdAt"`
+	Detail     string `json:"detail,omitempty"`
+	StartedAt  int64  `json:"startedAt"`
 	FinishedAt int64  `json:"finishedAt"`
+}
+
+type BackupRemoteConfig struct {
+	Enabled    bool   `json:"enabled"`
+	Target     string `json:"target"`
+	RclonePath string `json:"rclonePath"`
+}
+
+type BackupDrillConfig struct {
+	Enabled       bool   `json:"enabled"`
+	IntervalHours int    `json:"intervalHours"`
+	LastRun       int64  `json:"lastRun"`
+	LastStatus    string `json:"lastStatus"`
+	LastDetail    string `json:"lastDetail"`
 }
 
 // User is a panel account. Password hashes and TOTP secrets never leave the
@@ -225,6 +290,27 @@ type Job struct {
 	UpdatedAt int64  `json:"updatedAt"`
 }
 
+// Task is a recurring command that runs on one phone. A task with ProjectID is
+// a project task (cwd = the project's current release, project env injected);
+// an empty ProjectID is a phone task (cwd = $HOME).
+type Task struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	ServerID   string `json:"serverId"`
+	ProjectID  string `json:"projectId,omitempty"`
+	Command    string `json:"command"`
+	Cron       string `json:"cron"`
+	TimeoutSec int    `json:"timeoutSec"`
+	Enabled    bool   `json:"enabled"`
+	LastRun    int64  `json:"lastRun"`
+	LastStatus string `json:"lastStatus"`
+	LastExit   int    `json:"lastExit"`
+	LastError  string `json:"lastError"`
+	LastOutput string `json:"lastOutput,omitempty"`
+	CreatedAt  int64  `json:"createdAt"`
+	UpdatedAt  int64  `json:"updatedAt"`
+}
+
 type Alert struct {
 	ID         int64  `json:"id"`
 	Key        string `json:"key"`
@@ -249,4 +335,22 @@ type NotifyConfig struct {
 	TelegramToken string `json:"telegramToken"`
 	TelegramChat  string `json:"telegramChat"`
 	WebhookURL    string `json:"webhookUrl"`
+	NtfyURL       string `json:"ntfyUrl"`
+	GotifyURL     string `json:"gotifyUrl"`
+	GotifyToken   string `json:"gotifyToken"`
+	DiscordURL    string `json:"discordUrl"`
+	SlackURL      string `json:"slackUrl"`
+
+	SMTPHost  string `json:"smtpHost"`
+	SMTPPort  int    `json:"smtpPort"`
+	SMTPUser  string `json:"smtpUser"`
+	SMTPPass  string `json:"smtpPass"`
+	EmailFrom string `json:"emailFrom"`
+	EmailTo   string `json:"emailTo"`
+
+	QuietHours bool `json:"quietHours"`
+	QuietStart int  `json:"quietStart"`
+	QuietEnd   int  `json:"quietEnd"`
+
+	MaintenanceUntil int64 `json:"maintenanceUntil"`
 }

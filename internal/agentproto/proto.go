@@ -31,6 +31,7 @@ const (
 	TypeDeployEvent   = "deploy.event"
 	TypeAppLogs       = "app.logs"
 	TypeAppControl    = "app.control"
+	TypeAppReleases   = "app.releases"
 
 	TypeAddonProvision = "addon.provision"
 	TypeAddonControl   = "addon.control"
@@ -41,6 +42,13 @@ const (
 	TypeAddonRelay     = "addon.relay"
 	TypeAddonPromote   = "addon.promote"
 	TypeAddonLease     = "addon.lease"
+
+	TypeAgentUpdate = "agent.update"
+
+	TypeTaskSync  = "task.sync"
+	TypeTaskRun   = "task.run"
+	TypeTaskLogs  = "task.logs"
+	TypeTaskEvent = "task.event"
 )
 
 type Envelope struct {
@@ -82,6 +90,10 @@ type HelloAck struct {
 type Heartbeat struct {
 	Metrics Metrics     `json:"metrics"`
 	Apps    []AppStatus `json:"apps,omitempty"`
+	// Tasks is the compact run state of every scheduled task on the phone.
+	// Full output travels in task.event; the heartbeat only keeps the panel
+	// roughly in sync while a task is running.
+	Tasks []TaskStatus `json:"tasks,omitempty"`
 	// Caps is sent only when the capability map changes (an engine installed on
 	// the phone, or a new package manager). Empty means "unchanged".
 	Caps map[string]any `json:"caps,omitempty"`
@@ -89,19 +101,22 @@ type Heartbeat struct {
 
 // AppStatus is a supervised process reported by the agent in every heartbeat.
 type AppStatus struct {
-	Name         string `json:"name"`
-	Slug         string `json:"slug"`
-	Kind         string `json:"kind,omitempty"`
-	Role         string `json:"role,omitempty"`
-	Epoch        int    `json:"epoch,omitempty"`
-	State        string `json:"state"`
-	Port         int    `json:"port"`
-	PID          int    `json:"pid"`
-	Restarts     int    `json:"restarts"`
-	LagMS        int64  `json:"lagMs,omitempty"`
-	LastError    string `json:"lastError,omitempty"`
-	DeploymentID string `json:"deploymentId,omitempty"`
-	DeployStatus string `json:"deployStatus,omitempty"`
+	Name         string  `json:"name"`
+	Slug         string  `json:"slug"`
+	Kind         string  `json:"kind,omitempty"`
+	Role         string  `json:"role,omitempty"`
+	Epoch        int     `json:"epoch,omitempty"`
+	State        string  `json:"state"`
+	Port         int     `json:"port"`
+	PID          int     `json:"pid"`
+	Restarts     int     `json:"restarts"`
+	CPUPercent   float64 `json:"cpuPercent,omitempty"`
+	RSS          int64   `json:"rss,omitempty"`
+	HasUsage     bool    `json:"hasUsage,omitempty"`
+	LagMS        int64   `json:"lagMs,omitempty"`
+	LastError    string  `json:"lastError,omitempty"`
+	DeploymentID string  `json:"deploymentId,omitempty"`
+	DeployStatus string  `json:"deployStatus,omitempty"`
 }
 
 type Metrics struct {
@@ -264,15 +279,19 @@ type DeployRequest struct {
 	ProjectID     string            `json:"projectId"`
 	Slug          string            `json:"slug"`
 	Name          string            `json:"name"`
+	Kind          string            `json:"kind,omitempty"`
+	Ref           string            `json:"ref,omitempty"`
 	Repo          string            `json:"repo"`
 	Branch        string            `json:"branch"`
 	BuildCmd      string            `json:"buildCmd"`
 	StartCmd      string            `json:"startCmd"`
+	StaticDir     string            `json:"staticDir,omitempty"`
 	HealthPath    string            `json:"healthPath"`
 	Port          int               `json:"port"`
 	SourcePath    string            `json:"sourcePath,omitempty"`
 	Theme         string            `json:"theme,omitempty"`
 	Env           map[string]string `json:"env,omitempty"`
+	Secrets       map[string]string `json:"secrets,omitempty"`
 	KeepReleases  int               `json:"keepReleases"`
 	RestartPolicy string            `json:"restartPolicy,omitempty"`
 }
@@ -288,8 +307,10 @@ type DeployEvent struct {
 }
 
 type AppLogsRequest struct {
-	Slug  string `json:"slug"`
-	Bytes int    `json:"bytes"`
+	Slug      string `json:"slug"`
+	Bytes     int    `json:"bytes"`
+	Offset    int64  `json:"offset,omitempty"`
+	FromStart bool   `json:"fromStart,omitempty"`
 }
 
 type AppLogsResponse struct {
@@ -297,6 +318,9 @@ type AppLogsResponse struct {
 	Path      string `json:"path"`
 	Data      []byte `json:"data"`
 	Size      int64  `json:"size"`
+	Offset    int64  `json:"offset"`
+	Next      int64  `json:"next"`
+	Rotated   bool   `json:"rotated,omitempty"`
 	Truncated bool   `json:"truncated"`
 }
 
@@ -304,6 +328,25 @@ type AppLogsResponse struct {
 type AppControlRequest struct {
 	Slug   string `json:"slug"`
 	Action string `json:"action"`
+	// Release selects a specific kept release for rollback. Empty means the
+	// previous release (the original behaviour).
+	Release string `json:"release,omitempty"`
+}
+
+type AppReleasesRequest struct {
+	Slug string `json:"slug"`
+}
+
+type AppRelease struct {
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	Current    bool   `json:"current"`
+	ModifiedAt int64  `json:"modifiedAt"`
+}
+
+type AppReleasesResponse struct {
+	Slug     string       `json:"slug"`
+	Releases []AppRelease `json:"releases"`
 }
 
 // AddonSpec is a self-contained provisioning plan. The agent owns execution so
@@ -429,6 +472,66 @@ type AddonEvent struct {
 	Status   string `json:"status,omitempty"`
 	Line     string `json:"line,omitempty"`
 	Error    string `json:"error,omitempty"`
+}
+
+// TaskSpec is one recurring command as executed by the agent. The control
+// plane re-sends the full list for a phone whenever a task, project env or
+// addon binding changes; the agent persists it and runs it locally even while
+// the panel is unreachable.
+type TaskSpec struct {
+	ID         string            `json:"id"`
+	Name       string            `json:"name"`
+	Slug       string            `json:"slug,omitempty"` // project slug, when Project is true
+	Project    bool              `json:"project,omitempty"`
+	Command    string            `json:"command"`
+	Cron       string            `json:"cron"`
+	TimeoutSec int               `json:"timeoutSec,omitempty"`
+	Enabled    bool              `json:"enabled"`
+	Env        map[string]string `json:"env,omitempty"`
+}
+
+type TaskSyncRequest struct {
+	Tasks []TaskSpec `json:"tasks"`
+}
+
+type TaskRunRequest struct {
+	TaskID string `json:"taskId"`
+}
+
+type TaskLogsRequest struct {
+	TaskID string `json:"taskId"`
+	Bytes  int    `json:"bytes,omitempty"`
+}
+
+type TaskLogsResponse struct {
+	TaskID    string `json:"taskId"`
+	Path      string `json:"path"`
+	Data      []byte `json:"data"`
+	Size      int64  `json:"size"`
+	Truncated bool   `json:"truncated"`
+}
+
+// TaskStatus is the compact heartbeat state for one task.
+type TaskStatus struct {
+	ID       string `json:"id"`
+	LastRun  int64  `json:"lastRun"`
+	Status   string `json:"status"`
+	ExitCode int    `json:"exitCode"`
+	Error    string `json:"error,omitempty"`
+	Running  bool   `json:"running,omitempty"`
+}
+
+// TaskEvent reports a run transition and, on completion, a bounded output
+// tail. The full log stays on the phone and is fetched with task.logs.
+type TaskEvent struct {
+	TaskID     string `json:"taskId"`
+	Name       string `json:"name,omitempty"`
+	Status     string `json:"status"`
+	ExitCode   int    `json:"exitCode,omitempty"`
+	StartedAt  int64  `json:"startedAt,omitempty"`
+	FinishedAt int64  `json:"finishedAt,omitempty"`
+	Output     string `json:"output,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 type Empty struct{}

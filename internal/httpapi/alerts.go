@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/smtp"
 	"net/url"
 	"strconv"
 	"strings"
@@ -219,15 +221,139 @@ func (s *Server) startDeployAlertResolve(projectID string) {
 
 func (s *Server) notify(a model.Alert, event string) {
 	cfg := s.loadNotify()
-	if cfg.TelegramToken == "" && cfg.WebhookURL == "" {
+	if !hasNotifyChannel(cfg) {
+		return
+	}
+	now := time.Now()
+	if cfg.MaintenanceUntil > 0 && now.Unix() < cfg.MaintenanceUntil {
+		return
+	}
+	if inQuietHours(cfg, now) {
 		return
 	}
 	text := fmt.Sprintf("[%s] %s — %s", strings.ToUpper(event), a.Severity, a.Message)
+	s.sendAll(cfg, a, event, text)
+}
+
+func hasNotifyChannel(cfg model.NotifyConfig) bool {
+	return (cfg.TelegramToken != "" && cfg.TelegramChat != "") ||
+		cfg.WebhookURL != "" || cfg.NtfyURL != "" ||
+		(cfg.GotifyURL != "" && cfg.GotifyToken != "") ||
+		cfg.DiscordURL != "" || cfg.SlackURL != "" ||
+		(cfg.SMTPHost != "" && cfg.EmailFrom != "" && cfg.EmailTo != "")
+}
+
+func inQuietHours(cfg model.NotifyConfig, now time.Time) bool {
+	if !cfg.QuietHours || cfg.QuietStart == cfg.QuietEnd {
+		return false
+	}
+	h := now.Hour()
+	start, end := cfg.QuietStart, cfg.QuietEnd
+	if start < end {
+		return h >= start && h < end
+	}
+	return h >= start || h < end
+}
+
+func (s *Server) sendAll(cfg model.NotifyConfig, a model.Alert, event, text string) {
 	if cfg.TelegramToken != "" && cfg.TelegramChat != "" {
 		go s.sendTelegram(cfg, text)
 	}
 	if cfg.WebhookURL != "" {
 		go s.sendWebhook(cfg, a, event, text)
+	}
+	if cfg.NtfyURL != "" {
+		go s.sendNtfy(cfg, text)
+	}
+	if cfg.GotifyURL != "" && cfg.GotifyToken != "" {
+		go s.sendGotify(cfg, text)
+	}
+	if cfg.DiscordURL != "" {
+		go s.sendJSONWebhook(cfg.DiscordURL, map[string]any{"content": text})
+	}
+	if cfg.SlackURL != "" {
+		go s.sendJSONWebhook(cfg.SlackURL, map[string]any{"text": text})
+	}
+	if cfg.SMTPHost != "" && cfg.EmailFrom != "" && cfg.EmailTo != "" {
+		go s.sendEmail(cfg, text)
+	}
+}
+
+func (s *Server) sendNtfy(cfg model.NotifyConfig, text string) {
+	req, err := http.NewRequest(http.MethodPost, cfg.NtfyURL, strings.NewReader(text))
+	if err != nil {
+		s.log.Warn("ntfy notify", "err", err)
+		return
+	}
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	req.Header.Set("Title", "phleet alert")
+	resp, err := notifyClient().Do(req)
+	if err != nil {
+		s.log.Warn("ntfy notify", "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		s.log.Warn("ntfy notify", "status", resp.StatusCode)
+	}
+}
+
+func (s *Server) sendGotify(cfg model.NotifyConfig, text string) {
+	endpoint := strings.TrimRight(cfg.GotifyURL, "/") + "/message?token=" + url.QueryEscape(cfg.GotifyToken)
+	body, _ := json.Marshal(map[string]any{"title": "phleet", "message": text, "priority": 5})
+	resp, err := notifyClient().Post(endpoint, "application/json", bytes.NewReader(body))
+	if err != nil {
+		s.log.Warn("gotify notify", "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		s.log.Warn("gotify notify", "status", resp.StatusCode)
+	}
+}
+
+func (s *Server) sendJSONWebhook(endpoint string, payload map[string]any) {
+	body, _ := json.Marshal(payload)
+	resp, err := notifyClient().Post(endpoint, "application/json", bytes.NewReader(body))
+	if err != nil {
+		s.log.Warn("chat webhook notify", "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		s.log.Warn("chat webhook notify", "status", resp.StatusCode)
+	}
+}
+
+func (s *Server) sendEmail(cfg model.NotifyConfig, text string) {
+	port := cfg.SMTPPort
+	if port <= 0 {
+		port = 587
+	}
+	host := cfg.SMTPHost
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	var auth smtp.Auth
+	if cfg.SMTPUser != "" {
+		auth = smtp.PlainAuth("", cfg.SMTPUser, cfg.SMTPPass, host)
+	}
+	recipients := []string{}
+	for _, to := range strings.Split(cfg.EmailTo, ",") {
+		if to = strings.TrimSpace(to); to != "" {
+			recipients = append(recipients, to)
+		}
+	}
+	if len(recipients) == 0 {
+		return
+	}
+	subject := "phleet alert"
+	msg := []byte("From: " + cfg.EmailFrom + "\r\n" +
+		"To: " + strings.Join(recipients, ", ") + "\r\n" +
+		"Subject: " + subject + "\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n\r\n" +
+		text + "\r\n")
+	if err := smtp.SendMail(addr, auth, cfg.EmailFrom, recipients, msg); err != nil {
+		s.log.Warn("email notify", "err", err)
 	}
 }
 
@@ -336,6 +462,27 @@ func (s *Server) handlePutNotify(w http.ResponseWriter, r *http.Request) {
 	cfg.TelegramToken = strings.TrimSpace(cfg.TelegramToken)
 	cfg.TelegramChat = strings.TrimSpace(cfg.TelegramChat)
 	cfg.WebhookURL = strings.TrimSpace(cfg.WebhookURL)
+	cfg.NtfyURL = strings.TrimSpace(cfg.NtfyURL)
+	cfg.GotifyURL = strings.TrimSpace(cfg.GotifyURL)
+	cfg.GotifyToken = strings.TrimSpace(cfg.GotifyToken)
+	cfg.DiscordURL = strings.TrimSpace(cfg.DiscordURL)
+	cfg.SlackURL = strings.TrimSpace(cfg.SlackURL)
+	cfg.SMTPHost = strings.TrimSpace(cfg.SMTPHost)
+	cfg.SMTPUser = strings.TrimSpace(cfg.SMTPUser)
+	cfg.EmailFrom = strings.TrimSpace(cfg.EmailFrom)
+	cfg.EmailTo = strings.TrimSpace(cfg.EmailTo)
+	if cfg.SMTPPort <= 0 || cfg.SMTPPort > 65535 {
+		cfg.SMTPPort = 587
+	}
+	if cfg.QuietStart < 0 || cfg.QuietStart > 23 {
+		cfg.QuietStart = 22
+	}
+	if cfg.QuietEnd < 0 || cfg.QuietEnd > 23 {
+		cfg.QuietEnd = 7
+	}
+	if cfg.MaintenanceUntil < 0 {
+		cfg.MaintenanceUntil = 0
+	}
 	b, _ := json.Marshal(cfg)
 	if err := s.st.SetSetting(settingNotify, string(b)); err != nil {
 		apiErr(w, 500, err)
@@ -346,17 +493,13 @@ func (s *Server) handlePutNotify(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
 	cfg := s.loadNotify()
-	if cfg.TelegramToken == "" && cfg.WebhookURL == "" {
-		apiErr(w, 400, errors.New("configure Telegram or a webhook first"))
+	if !hasNotifyChannel(cfg) {
+		apiErr(w, 400, errors.New("configure at least one notification channel first"))
 		return
 	}
 	text := "phleet test notification — " + time.Now().Format(time.RFC3339)
-	if cfg.TelegramToken != "" && cfg.TelegramChat != "" {
-		s.sendTelegram(cfg, text)
-	}
-	if cfg.WebhookURL != "" {
-		s.sendWebhook(cfg, model.Alert{Kind: "test", Severity: "info", Message: text, Status: "test"}, "test", text)
-	}
+	// A test bypasses quiet hours and maintenance mode on purpose.
+	s.sendAll(cfg, model.Alert{Kind: "test", Severity: "info", Message: text, Status: "test"}, "test", text)
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 

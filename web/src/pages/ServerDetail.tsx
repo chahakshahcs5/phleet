@@ -24,7 +24,7 @@ import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api'
 import FilesTab from '../components/FilesTab'
-import { PromptDialog } from '../components/Dialog'
+import { PromptDialog, ConfirmDialog } from '../components/Dialog'
 import ProcessesTab from '../components/ProcessesTab'
 import TerminalTab from '../components/TerminalTab'
 import { Badge, Bar, Button, Card, KeyValue, Sparkline, Spinner, StatusDot, cn } from '../components/ui'
@@ -151,7 +151,15 @@ export default function ServerDetail() {
 
       <div className="min-h-0 flex-1 px-4 py-5 md:px-8">
         {tab === 'settings' ? (
-          <ServerSettings server={server} onDeleted={() => remove.mutate()} deleting={remove.isPending} />
+          <ServerSettings
+            server={server}
+            onDeleted={() => remove.mutate()}
+            onRetired={() => {
+              qc.invalidateQueries({ queryKey: ['servers'] })
+              navigate('/')
+            }}
+            deleting={remove.isPending}
+          />
         ) : !server.online && tab !== 'overview' ? (
           <Card className="p-6 text-center text-xs text-zinc-500">
             This phone is offline. {tab === 'terminal' ? 'Terminal' : tab === 'files' ? 'Files' : 'Processes'} needs a
@@ -452,14 +460,18 @@ function Overview({ server }: { server: Server }) {
 function ServerSettings({
   server,
   onDeleted,
+  onRetired,
   deleting,
 }: {
   server: Server
   onDeleted: () => void
+  onRetired: () => void
   deleting: boolean
 }) {
   const qc = useQueryClient()
   const [name, setName] = useState(server.name)
+  const [retireOpen, setRetireOpen] = useState(false)
+  const [purgeAddons, setPurgeAddons] = useState(false)
   const [labels, setLabels] = useState<{ k: string; v: string }[]>(
     Object.entries(server.labels ?? {}).map(([k, v]) => ({ k, v })),
   )
@@ -481,6 +493,14 @@ function ServerSettings({
   const drain = useMutation({
     mutationFn: (v: boolean) => api.patchServer(server.id, { drain: v }),
     onSuccess: refresh,
+  })
+  const update = useMutation({
+    mutationFn: () => api.updateAgent(server.id),
+    onSuccess: refresh,
+  })
+  const retire = useMutation({
+    mutationFn: (purge: boolean) => api.retireServer(server.id, purge),
+    onSuccess: onRetired,
   })
 
   const field =
@@ -547,6 +567,28 @@ function ServerSettings({
 
       <div className="space-y-3">
         <Card className="p-4">
+          <div className={caption}>Agent</div>
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <span className="font-mono text-[11px] text-zinc-400">{server.agentVersion || 'unknown'}</span>
+            <Badge tone={server.online ? 'good' : 'neutral'}>{server.online ? 'connected' : 'offline'}</Badge>
+          </div>
+          <p className="mt-2 text-[10px] leading-relaxed text-zinc-500">
+            Asks the phone to check the signed update manifest now instead of waiting for its six-hour timer.
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            className="mt-3 w-full"
+            disabled={!server.online || update.isPending}
+            onClick={() => update.mutate()}
+          >
+            {update.isPending ? <Spinner className="h-3 w-3" /> : <RefreshCw size={12} />} Check for update
+          </Button>
+          {update.isError ? <div className="mt-2 text-[10px] text-red-400">{String(update.error)}</div> : null}
+          {update.isSuccess ? <div className="mt-2 text-[10px] text-emerald-300">update check requested</div> : null}
+        </Card>
+
+        <Card className="p-4">
           <div className={caption}>Scheduling</div>
           <div className="mt-2 flex items-center justify-between gap-2">
             <span className="text-[11px] text-zinc-400">{server.drain ? 'Drained' : 'Accepting work'}</span>
@@ -577,8 +619,45 @@ function ServerSettings({
           <Button variant="danger" size="sm" className="mt-3 w-full" disabled={deleting} onClick={onDeleted}>
             <Trash2 size={12} /> Remove server
           </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="mt-2 w-full"
+            disabled={retire.isPending}
+            onClick={() => setRetireOpen(true)}
+          >
+            Retire / wipe phone
+          </Button>
+          {retire.isError ? <div className="mt-2 text-[10px] text-red-400">{String(retire.error)}</div> : null}
         </Card>
       </div>
+
+      <ConfirmDialog
+        open={retireOpen}
+        onClose={() => setRetireOpen(false)}
+        title={`Retire ${server.name}?`}
+        description={
+          <div className="space-y-2">
+            <p>
+              Stops its apps, deletes its scheduled tasks and removes it from the panel. Data on the device stays
+              unless you also delete its databases.
+            </p>
+            <label className="flex items-start gap-2 text-[11px] text-zinc-300">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={purgeAddons}
+                onChange={(e) => setPurgeAddons(e.target.checked)}
+              />
+              Also delete every database/service on this phone and their backups. This cannot be undone.
+            </label>
+          </div>
+        }
+        confirmLabel="Retire phone"
+        danger
+        busy={retire.isPending}
+        onConfirm={() => retire.mutate(purgeAddons)}
+      />
     </div>
   )
 }

@@ -99,9 +99,16 @@ function RulesForm() {
 function NotifyForm() {
   const qc = useQueryClient()
   const cfgQ = useQuery({ queryKey: ['notify'], queryFn: api.notifyConfig })
-  const [cfg, setCfg] = useState<NotifyConfig>({ telegramToken: '', telegramChat: '', webhookUrl: '' })
+  const empty: NotifyConfig = {
+    telegramToken: '', telegramChat: '', webhookUrl: '',
+    ntfyUrl: '', gotifyUrl: '', gotifyToken: '', discordUrl: '', slackUrl: '',
+    smtpHost: '', smtpPort: 587, smtpUser: '', smtpPass: '', emailFrom: '', emailTo: '',
+    quietHours: false, quietStart: 22, quietEnd: 7, maintenanceUntil: 0,
+  }
+  const [cfg, setCfg] = useState<NotifyConfig>(empty)
   useEffect(() => {
-    if (cfgQ.data) setCfg(cfgQ.data)
+    if (cfgQ.data) setCfg({ ...empty, ...cfgQ.data })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cfgQ.data])
   const save = useMutation({
     mutationFn: () => api.saveNotifyConfig(cfg),
@@ -110,24 +117,79 @@ function NotifyForm() {
   const test = useMutation({ mutationFn: () => api.testNotify() })
   const input =
     'h-9 w-full rounded-lg border border-zinc-800 bg-zinc-950/70 px-3 font-mono text-[11px] text-zinc-200 outline-none focus:border-emerald-400/40'
+  const label = 'text-[10px] text-zinc-500'
+  const maintenanceValue = cfg.maintenanceUntil
+    ? new Date(cfg.maintenanceUntil * 1000).toISOString().slice(0, 16)
+    : ''
   return (
     <Card className="p-4">
       <div className="text-[10px] font-medium tracking-widest text-zinc-500 uppercase">Notifications</div>
-      <p className="mt-1 text-[10px] text-zinc-600">Alerts open and resolve are posted here. Leave blank to disable.</p>
-      <div className="mt-3 space-y-3">
-        <div>
-          <div className="text-[10px] text-zinc-500">Telegram bot token</div>
-          <input className={`${input} mt-1`} value={cfg.telegramToken} onChange={(e) => setCfg({ ...cfg, telegramToken: e.target.value })} placeholder="123456:ABC..." />
+      <p className="mt-1 text-[10px] text-zinc-600">
+        Alerts open and resolve are posted to every configured channel. Leave a channel blank to disable it.
+      </p>
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <div><div className={label}>Telegram bot token</div>
+          <input className={`${input} mt-1`} value={cfg.telegramToken} onChange={(e) => setCfg({ ...cfg, telegramToken: e.target.value })} placeholder="123456:ABC..." /></div>
+        <div><div className={label}>Telegram chat id</div>
+          <input className={`${input} mt-1`} value={cfg.telegramChat} onChange={(e) => setCfg({ ...cfg, telegramChat: e.target.value })} placeholder="-100123456789" /></div>
+        <div className="sm:col-span-2"><div className={label}>Generic webhook URL</div>
+          <input className={`${input} mt-1`} value={cfg.webhookUrl} onChange={(e) => setCfg({ ...cfg, webhookUrl: e.target.value })} placeholder="https://example.com/phleet-hook" /></div>
+        <div className="sm:col-span-2"><div className={label}>ntfy URL (including topic)</div>
+          <input className={`${input} mt-1`} value={cfg.ntfyUrl} onChange={(e) => setCfg({ ...cfg, ntfyUrl: e.target.value })} placeholder="https://ntfy.sh/my-phleet-topic" /></div>
+        <div><div className={label}>Gotify base URL</div>
+          <input className={`${input} mt-1`} value={cfg.gotifyUrl} onChange={(e) => setCfg({ ...cfg, gotifyUrl: e.target.value })} placeholder="https://gotify.example.com" /></div>
+        <div><div className={label}>Gotify token</div>
+          <input className={`${input} mt-1`} value={cfg.gotifyToken} onChange={(e) => setCfg({ ...cfg, gotifyToken: e.target.value })} placeholder="A..." /></div>
+        <div><div className={label}>Discord webhook URL</div>
+          <input className={`${input} mt-1`} value={cfg.discordUrl} onChange={(e) => setCfg({ ...cfg, discordUrl: e.target.value })} placeholder="https://discord.com/api/webhooks/..." /></div>
+        <div><div className={label}>Slack webhook URL</div>
+          <input className={`${input} mt-1`} value={cfg.slackUrl} onChange={(e) => setCfg({ ...cfg, slackUrl: e.target.value })} placeholder="https://hooks.slack.com/services/..." /></div>
+
+        <div><div className={label}>SMTP host</div>
+          <input className={`${input} mt-1`} value={cfg.smtpHost} onChange={(e) => setCfg({ ...cfg, smtpHost: e.target.value })} placeholder="smtp.example.com" /></div>
+        <div><div className={label}>SMTP port</div>
+          <input type="number" className={`${input} mt-1`} value={cfg.smtpPort} onChange={(e) => setCfg({ ...cfg, smtpPort: Number(e.target.value) || 587 })} /></div>
+        <div><div className={label}>SMTP user</div>
+          <input className={`${input} mt-1`} value={cfg.smtpUser} onChange={(e) => setCfg({ ...cfg, smtpUser: e.target.value })} /></div>
+        <div><div className={label}>SMTP password</div>
+          <input type="password" className={`${input} mt-1`} value={cfg.smtpPass} onChange={(e) => setCfg({ ...cfg, smtpPass: e.target.value })} /></div>
+        <div><div className={label}>Email from</div>
+          <input className={`${input} mt-1`} value={cfg.emailFrom} onChange={(e) => setCfg({ ...cfg, emailFrom: e.target.value })} placeholder="phleet@example.com" /></div>
+        <div><div className={label}>Email to (comma separated)</div>
+          <input className={`${input} mt-1`} value={cfg.emailTo} onChange={(e) => setCfg({ ...cfg, emailTo: e.target.value })} placeholder="me@example.com" /></div>
+
+        <div className="sm:col-span-2 border-t border-zinc-800/60 pt-3">
+          <label className="flex items-center gap-2 text-[11px] text-zinc-300">
+            <input type="checkbox" checked={cfg.quietHours} onChange={(e) => setCfg({ ...cfg, quietHours: e.target.checked })} />
+            Quiet hours (no external notifications)
+          </label>
+          <div className="mt-2 grid grid-cols-2 gap-3">
+            <div><div className={label}>From hour (0–23)</div>
+              <input type="number" min={0} max={23} className={`${input} mt-1`} value={cfg.quietStart} onChange={(e) => setCfg({ ...cfg, quietStart: Math.max(0, Math.min(23, Number(e.target.value) || 0)) })} /></div>
+            <div><div className={label}>To hour (0–23)</div>
+              <input type="number" min={0} max={23} className={`${input} mt-1`} value={cfg.quietEnd} onChange={(e) => setCfg({ ...cfg, quietEnd: Math.max(0, Math.min(23, Number(e.target.value) || 0)) })} /></div>
+          </div>
         </div>
-        <div>
-          <div className="text-[10px] text-zinc-500">Telegram chat id</div>
-          <input className={`${input} mt-1`} value={cfg.telegramChat} onChange={(e) => setCfg({ ...cfg, telegramChat: e.target.value })} placeholder="-100123456789" />
-        </div>
-        <div>
-          <div className="text-[10px] text-zinc-500">Webhook URL</div>
-          <input className={`${input} mt-1`} value={cfg.webhookUrl} onChange={(e) => setCfg({ ...cfg, webhookUrl: e.target.value })} placeholder="https://example.com/phleet-hook" />
+        <div className="sm:col-span-2">
+          <div className={label}>Maintenance window until (silences external notifications)</div>
+          <div className="mt-1 flex items-center gap-2">
+            <input
+              type="datetime-local"
+              className={input}
+              value={maintenanceValue}
+              onChange={(e) => {
+                const ts = e.target.value ? Math.floor(new Date(e.target.value).getTime() / 1000) : 0
+                setCfg({ ...cfg, maintenanceUntil: ts })
+              }}
+            />
+            <Button type="button" size="sm" variant="ghost" onClick={() => setCfg({ ...cfg, maintenanceUntil: 0 })}>
+              Clear
+            </Button>
+          </div>
         </div>
       </div>
+
       {save.isError ? <div className="mt-2 text-[11px] text-red-400">{String(save.error)}</div> : null}
       {test.isError ? <div className="mt-2 text-[11px] text-red-400">{String(test.error)}</div> : null}
       {test.isSuccess ? <div className="mt-2 text-[11px] text-emerald-300">test sent</div> : null}

@@ -86,6 +86,16 @@ type Agent struct {
 	deployMu   sync.Mutex
 	addonMu    sync.Mutex
 
+	taskMu         sync.Mutex
+	tasks          map[string]agentproto.TaskSpec
+	taskStates     map[string]taskState
+	taskRunning    map[string]bool
+	tasksPath      string
+	taskStatesPath string
+
+	appCPUMu sync.Mutex
+	appCPU   map[string]appCPUSample
+
 	tunMu   sync.Mutex
 	tunSess *yamux.Session
 
@@ -140,17 +150,23 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		tokenPath = filepath.Join(cfg.StateDir, "agent.token")
 	}
 	a := &Agent{
-		cfg:       cfg,
-		home:      home,
-		roots:     roots,
-		log:       log,
-		sessions:  map[string]*ptySession{},
-		apps:      map[string]*appProcess{},
-		appsPath:  filepath.Join(cfg.StateDir, "apps.json"),
-		relays:    map[string]*relayListener{},
-		token:     cfg.Token,
-		tokenPath: tokenPath,
-		helloAck:  make(chan struct{}, 1),
+		cfg:            cfg,
+		home:           home,
+		roots:          roots,
+		log:            log,
+		sessions:       map[string]*ptySession{},
+		apps:           map[string]*appProcess{},
+		appsPath:       filepath.Join(cfg.StateDir, "apps.json"),
+		tasks:          map[string]agentproto.TaskSpec{},
+		taskStates:     map[string]taskState{},
+		taskRunning:    map[string]bool{},
+		tasksPath:      filepath.Join(cfg.StateDir, "tasks.json"),
+		taskStatesPath: filepath.Join(cfg.StateDir, "task-state.json"),
+		appCPU:         map[string]appCPUSample{},
+		relays:         map[string]*relayListener{},
+		token:          cfg.Token,
+		tokenPath:      tokenPath,
+		helloAck:       make(chan struct{}, 1),
 	}
 	if a.cfg.ID == "" {
 		a.cfg.ID = loadID(cfg.StateDir)
@@ -253,7 +269,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.loadApps(); err != nil {
 		a.log.Warn("load apps", "err", err)
 	}
+	if err := a.loadTasks(); err != nil {
+		a.log.Warn("load tasks", "err", err)
+	}
 	a.restoreApps()
+	go a.taskLoop(ctx)
 	go a.lagLoop(ctx)
 	go a.leaseLoop(ctx)
 	go a.capsLoop(ctx)
@@ -544,6 +564,51 @@ func (a *Agent) dispatch(ctx context.Context, env agentproto.Envelope) {
 			err := a.appControl(req)
 			a.complete(env, agentproto.Empty{}, err)
 		}()
+	case agentproto.TypeAppReleases:
+		var req agentproto.AppReleasesRequest
+		if err := json.Unmarshal(env.Data, &req); err != nil {
+			a.fail(env, err)
+			return
+		}
+		go func() {
+			res, err := a.appReleases(req.Slug)
+			a.complete(env, res, err)
+		}()
+	case agentproto.TypeAgentUpdate:
+		go func() {
+			err := a.checkForUpdate(ctx)
+			a.complete(env, agentproto.Empty{}, err)
+		}()
+	case agentproto.TypeTaskSync:
+		var req agentproto.TaskSyncRequest
+		if err := json.Unmarshal(env.Data, &req); err != nil {
+			a.fail(env, err)
+			return
+		}
+		go func() {
+			err := a.syncTasks(req)
+			a.complete(env, agentproto.Empty{}, err)
+		}()
+	case agentproto.TypeTaskRun:
+		var req agentproto.TaskRunRequest
+		if err := json.Unmarshal(env.Data, &req); err != nil {
+			a.fail(env, err)
+			return
+		}
+		go func() {
+			err := a.runTaskNow(req.TaskID)
+			a.complete(env, agentproto.Empty{}, err)
+		}()
+	case agentproto.TypeTaskLogs:
+		var req agentproto.TaskLogsRequest
+		if err := json.Unmarshal(env.Data, &req); err != nil {
+			a.fail(env, err)
+			return
+		}
+		go func() {
+			res, err := a.taskLogs(req)
+			a.complete(env, res, err)
+		}()
 	case agentproto.TypeAddonProvision:
 		var req agentproto.AddonSpec
 		if err := json.Unmarshal(env.Data, &req); err != nil {
@@ -702,6 +767,7 @@ func (a *Agent) sendHeartbeat() {
 	hb := agentproto.Heartbeat{
 		Metrics: m,
 		Apps:    a.appStatuses(),
+		Tasks:   a.taskStatuses(),
 		// Send capabilities only when they change. The control plane otherwise
 		// rewrites the same JSON several times a minute per phone.
 		Caps: a.capsIfChanged(),
@@ -737,12 +803,15 @@ func (a *Agent) refreshMetrics() {
 }
 
 func (a *Agent) appStatuses() []agentproto.AppStatus {
+	// Scan /proc once per heartbeat, outside the per-app locks.
+	groups := scanProcessGroups()
+	now := time.Now()
 	a.appsMu.Lock()
 	defer a.appsMu.Unlock()
 	out := make([]agentproto.AppStatus, 0, len(a.apps))
 	for _, p := range a.apps {
 		p.mu.Lock()
-		out = append(out, agentproto.AppStatus{
+		st := agentproto.AppStatus{
 			Name:         p.spec.Name,
 			Slug:         p.spec.Slug,
 			Kind:         p.spec.Kind,
@@ -756,8 +825,21 @@ func (a *Agent) appStatuses() []agentproto.AppStatus {
 			LastError:    p.lastError,
 			DeploymentID: p.spec.DeploymentID,
 			DeployStatus: p.spec.DeployStatus,
-		})
+		}
+		if p.pid > 0 {
+			if u, ok := groups[p.pid]; ok {
+				st.HasUsage = true
+				st.RSS = u.rss
+				a.appCPUMu.Lock()
+				if prev, seen := a.appCPU[p.spec.Slug]; seen && now.After(prev.at) && u.ticks >= prev.ticks {
+					st.CPUPercent = float64(u.ticks-prev.ticks) / clockTicks / now.Sub(prev.at).Seconds() * 100
+				}
+				a.appCPU[p.spec.Slug] = appCPUSample{ticks: u.ticks, at: now}
+				a.appCPUMu.Unlock()
+			}
+		}
 		p.mu.Unlock()
+		out = append(out, st)
 	}
 	return out
 }

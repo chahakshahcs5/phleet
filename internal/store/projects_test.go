@@ -83,6 +83,26 @@ func TestProjectPlacementAndDeployments(t *testing.T) {
 	}
 }
 
+func TestProjectKindsAndStaticDirRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	for _, p := range []model.Project{
+		{ID: "s", Name: "Site", Slug: "site", Kind: "static", StaticDir: "dist"},
+		{ID: "w", Name: "Worker", Slug: "worker", Kind: "worker", StartCmd: "node worker.js"},
+	} {
+		if err := st.CreateProject(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	site, err := st.GetProject("s")
+	if err != nil || site.Kind != "static" || site.StaticDir != "dist" {
+		t.Fatalf("static project: %v %+v", err, site)
+	}
+	worker, err := st.GetProject("w")
+	if err != nil || worker.Kind != "worker" || worker.StartCmd != "node worker.js" {
+		t.Fatalf("worker project: %v %+v", err, worker)
+	}
+}
+
 func TestPruneProjectHistory(t *testing.T) {
 	st := newTestStore(t)
 	_ = st.CreateProject(model.Project{ID: "p", Name: "p", Slug: "p"})

@@ -1,4 +1,13 @@
-name: Deploy phleet project
+name: Deploy project to phleet
+
+# Copy this file into the repository of the project you want phleet to deploy,
+# for example <your-project>/.github/workflows/deploy.yml.
+#
+# Repository secrets:   PHLEET_URL, PHLEET_TOKEN
+# Repository variable:  PHLEET_PROJECT_ID
+#
+# Do not keep this workflow in the phleet control-plane repository: it would
+# deploy phleet itself whenever the variable is set.
 
 on:
   workflow_dispatch:

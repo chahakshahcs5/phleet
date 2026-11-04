@@ -27,7 +27,8 @@ app-stack            parent: repo/bundle, branch, env, addons
 ## 2. Make the app phone-friendly first
 
 1. **Honour `$PORT`.** phleet assigns a port per service and injects `PORT`; the process must
-   listen on it and on `0.0.0.0` (phleet also sets `HOST=0.0.0.0`).
+   listen on it and on loopback (phleet also sets `HOST=127.0.0.1`). The agent proxies to
+   `127.0.0.1`, so binding `0.0.0.0` is unnecessary and exposes the port on the LAN.
 2. **Expose a health endpoint.** `/health` should return `200` once the process can serve
    traffic. phleet accepts `200–499`; a connection refusal or a timeout fails the deploy and
    rolls back.
@@ -49,6 +50,11 @@ app-stack            parent: repo/bundle, branch, env, addons
 | Start command | `pnpm --filter web start` | `pnpm --filter api start` | `pnpm --filter mcp start` |
 | Health path | `/health` | `/health` | `/health` |
 
+Each service also has a **kind**: `web app` (the default), `static site`, or `worker`. A static
+service serves a directory from its release (set the static directory, e.g. `dist`) and needs no
+start command. A worker runs a supervised command with no port or hostname, which suits queue
+consumers and background jobs in the same repository. A stack can mix all three.
+
 Per-service environment overrides the stack environment at deploy time. A typical web service
 needs the private URL of the API on the same phone:
 
@@ -56,6 +62,10 @@ needs the private URL of the API on the same phone:
 API_INTERNAL_URL=http://127.0.0.1:<api-port>
 NEXT_PUBLIC_API_URL=https://app-api.example.com
 ```
+
+Each service has its own `PHLEET_DATA_DIR` (`~/apps/<service-slug>/shared/data`). Use it for
+uploads, local SQLite files and caches that must survive the next deploy; the release directory
+itself is replaced on every release.
 
 `NEXT_PUBLIC_*` values are inlined at build time, so set the public URL before the first build.
 

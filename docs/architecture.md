@@ -81,16 +81,21 @@ Request/response is correlated by `id` → `replyTo`. Binary payloads (PTY chunk
 | `fs.write.chunk` | CP → agent | uploads split into sub-2 MB chunks (WebSocket read limit) |
 | `fs.extract` | CP → agent | safe zip extraction into a directory |
 | `proc.list` | CP → agent | process snapshot for the UI |
-| `deploy.request` | CP → agent | self-contained deploy plan |
+| `deploy.request` | CP → agent | self-contained deploy plan (branch, tag or commit ref) |
 | `deploy.event` | agent → CP | status transitions and log lines |
-| `app.logs` | CP → agent | tail of the supervised app's log |
-| `app.control` | CP → agent | start, stop, restart, rollback, delete |
+| `app.logs` | CP → agent | tail of the supervised app's log; optional byte offset for live streaming |
+| `app.control` | CP → agent | start, stop, restart, rollback (previous or a named release), delete |
+| `app.releases` | CP → agent | list kept release directories for the rollback picker |
 | `addon.provision` | CP → agent | self-contained engine install + init + start plan |
 | `addon.control` | CP → agent | start, stop, restart, delete (optionally purge the data) |
 | `addon.backup` / `addon.restore` | CP → agent | engine-native dump/restore; the file moves over the authenticated HTTP API |
 | `addon.event` | agent → CP | provisioning, backup, restore logs and terminal status |
 | `addon.relay` | CP → agent | start/stop a loopback facade that forwards to an addon on another phone |
 | `addon.promote` | CP → agent | promote a standby after the control plane fenced the old primary |
+| `task.sync` | CP → agent | replace the full recurring-task list for this phone |
+| `task.run` | CP → agent | run a task immediately |
+| `task.logs` | CP → agent | tail a task's on-device log |
+| `task.event` | agent → CP | run finished: status, exit code and a bounded output tail |
 
 The hub keeps a pending map per connection, a 90 s read deadline (heartbeats keep it alive), and per-session PTY channels. A slow UI consumer drops chunks instead of blocking the agent read loop.
 
@@ -124,8 +129,12 @@ app are reachable.
 |---|---|
 | `servers` | identity, capabilities (JSON), labels, status, last_seen |
 | `metrics` | one row per heartbeat; indexed on `(server_id, ts)` |
+| `app_metrics` | CPU and RSS for a project process group, sampled at most every 15 s; indexed on `(project_id, ts)` |
+| `request_logs` | edge request metadata: method, path, status, bytes, duration, host, IP; 7-day retention |
+| `uptime_checks` | last edge health check per project: timestamp, ok, status code, error |
+| `project_secrets` | encrypted secret files staged under `$PHLEET_SECRETS_DIR` at deploy time |
 | `events` | audit/activity feed |
-| `projects` | slug, repo, commands, health path, hostname, encrypted env, selector, replicas, pinned phone, source type/size |
+| `projects` | slug, kind (`app`/`static`/`worker`/`stack`), repo, commands, static dir, health path, hostname, encrypted env, encrypted webhook secret, selector, replicas, pinned phone, source type/size |
 | `placements` | project → phone, port, app status/pid/restarts, desired state, release |
 | `deployments` | one row per deploy (per phone) with status and timing |
 | `deploy_logs` | streamed deploy output, pruned with its deployment |
@@ -139,11 +148,13 @@ app are reachable.
 | `addon_bindings` | addon ↔ project; drives environment injection |
 | `addon_relays` | addon → app phone loopback facade port |
 | `addon_logs` | provisioning, relay, backup, promotion and restore output (30-day retention) |
-| `backups` | dump metadata, plaintext SHA-256, encryption flag and control-plane file path (last 10 per addon) |
+| `backups` | dump metadata, plaintext SHA-256, encryption flag, local path, off-site status/key/error and control-plane file path (last 10 per addon) |
+| `backup_drills` | non-destructive restore-readiness checks: addon, backup, status, detail, timestamps |
+| `scheduled_tasks` | cron command, target phone, optional project, timeout, enabled flag, last run/status/exit/output |
 
 Retention: raw samples for 14 days, deployment history for 30 days, each deployment keeps its log lines.
 Metrics queries downsample to 30 s / 1 min / 5 min / 30 min buckets depending on the window, so the UI never loads
-more than a few hundred points.
+more than a few hundred points. Per-app samples share the 14-day window; request logs are kept for 7 days.
 
 `UpsertServer` deliberately does **not** overwrite `name` or `labels` on reconnect: those are user-owned; the handler and the store both protect a rename from being clobbered by an agent hello.
 
@@ -170,16 +181,34 @@ folder browser uploads use chunked `fs.write.chunk` calls (1 MB) so they stay un
 `fs.extract` rejects traversal, symlinks and archives expanding beyond 512 MB. This avoids requiring git on the phone
 and works the same over LAN or Cloudflare.
 
+A deploy plan may carry a branch, tag or commit `Ref`. A commit that is not the branch tip is fetched with
+`git fetch --depth 1 origin <sha>`. Git webhooks verify the provider signature/token and then call the same deployment
+path with the pushed SHA. The release picker uses `app.releases` to list kept directories and `app.control` with a
+release name to roll back to one of them; the same health check and switchboard apply.
+
 Supervisor behaviour (`internal/agent/apps.go`):
 
+- A project's **kind** selects the runtime: `app` supervises one process behind the switchboard,
+  `static` runs an agent-owned file server on the same switchboard (no runtime on the phone, dotfiles
+  blocked, SPA fallback when `index.html` exists), and `worker` supervises a process with no port or
+  hostname. Static sites and apps use blue-green releases; a worker is stopped and replaced, since it
+  has no traffic to drain.
 - Build and runtime commands receive `NODE_ENV=production` and the project environment. Node projects that need
   `tsc`, Vite or other devDependencies during the build must use `npm install --include=dev` (or
   `npm ci --include=dev`); plain `npm ci` skips devDependencies under `NODE_ENV=production`.
-- A single app project maps to one process and one port. A **stack** project groups child app projects, each with its
-  own subdomain, port, process, health check and logs; the stack shares the repo, branch and encrypted env and deploys
-  every service together. Services pinned to the same phone receive `PHLEET_SERVICE_<SLUG>_URL` loopback URLs.
+- A single project maps to one workload: a web app (one process and one port), a static site (an
+  agent-owned file server on one port), or a worker (one process, no port). A **stack** project groups
+  child projects, each with its own kind, subdomain/port, process, health check and logs; the stack
+  shares the repo, branch and encrypted env and deploys every service together. Services pinned to the
+  same phone receive `PHLEET_SERVICE_<SLUG>_URL` loopback URLs.
 - Each app is a process group (`Setpgid`), so stop/restart kills the whole tree.
 - stdout/stderr go to `~/apps/<slug>/logs/app.log`, rotated at 5 MB (one old file kept).
+- Every heartbeat scans `/proc` once and reports CPU/RSS for each app's process group. This is
+  readable without root and includes children such as node workers; static sites have no process
+  and report no usage.
+- Runtime state lives in `~/apps/<slug>/shared/data`, outside the release tree, and is injected as
+  `PHLEET_DATA_DIR`. The release directory is disposable: a deploy swaps `current` and prunes old
+  releases, so uploads, SQLite files and caches written there would otherwise be lost.
 - Unexpected exits are restarted with exponential backoff (1 s → 30 s); intentional stops are not.
 - Wanted state lives in `~/.phleet/apps.json`, so an agent restart (or phone reboot via Termux:Boot) brings apps
   back without the control plane.
@@ -261,6 +290,15 @@ SHA-256, and pruned to ten. Restore verifies the checksum, writes a local pre-re
 the engine's restore path; Postgres restores through a live connection, Redis, SQLite and rclone are stopped first. A background loop takes a daily backup when the phone is
 charging or above 40 %.
 
+**Off-site copies.** When enabled, each completed encrypted dump is copied with `rclone copyto` to
+`<target>/<addonID>/<backupID><ext>`, plus a JSON metadata sidecar. The rclone remote and its
+credentials live on the control-plane host, not in phleet. `backups.remote_status/key/error`
+tracks the copy; verify, download and restore fetch the file back automatically if the local copy is
+missing, and prune/delete remove the remote objects. **Restore drills** run the same download,
+checksum and engine-native integrity check on the latest backup and record a `backup_drills` row;
+they never touch the live data directory. Auto-drills are opt-in with an interval and run from the
+control plane.
+
 Replication is explicit: `POST /addons/{id}/standby` allocates a port and data directory on another phone, opens a
 relay back to the primary, and runs `pg_basebackup`/`REPLICAOF`. The primary samples lag every 30 s into the
 heartbeat; `POST /addons/{id}/promote` fences the old primary (`addon.control stop`) before `addon.promote`. There is
@@ -273,6 +311,26 @@ running and its last lag is within `max_lag_ms`. The control plane is the witnes
 lease is a database outage for opted-in addons.
 See [runbooks/database-failover.md](runbooks/database-failover.md) for the procedure and the auto-failover trade-offs.
 
+
+### 6.2 Scheduled tasks
+
+A task is a recurring command with a five-field cron expression, owned by one phone and optionally
+one project. The control plane validates it, stores it in `scheduled_tasks`, and pushes the **full
+list for that phone** with `task.sync`:
+
+- create/update/delete;
+- agent hello (reconnect);
+- project deploy completion (the `current` release and env may have changed);
+- project, addon-binding and placement changes;
+- a two-minute safety-net sync.
+
+The agent persists the list in `~/.phleet/tasks.json`, parses the same `internal/cron` package as the
+panel, and checks due tasks every 20 seconds. A task whose `LastRun` already equals the current
+minute is skipped, so a reconnect or a manual run cannot double-fire. Project tasks run in
+`~/apps/<slug>/current` with the project/stack env, addon credentials and `PHLEET_DATA_DIR`; phone
+tasks run in `$HOME`. Agent tokens are stripped from the environment, the process is a process group
+with a timeout kill, and output is rotated at 1 MB. Run state lives in `task-state.json`, so a reboot
+does not replay missed minutes, and a run interrupted by an agent restart is marked `interrupted`.
 
 ## 7. Scheduling, failover and alerts
 
@@ -325,12 +383,32 @@ An evaluator runs every 30 seconds against servers, placements and the latest de
 | app crashed | placement status `crashed` | warning |
 | addon failed | addon status `failed` or `crashed` | critical |
 | addon unreachable | phone online but the addon is not serving | warning |
+| addon quota | data usage above the advisory size hint (critical at 2×) | warning/critical |
 | deploy failed | latest deployment `failed` | critical |
 
 Alerts are keyed (`server:<id>:temp`, `deploy:<project>`, …) so they open once and update in place instead of
 spamming. They resolve automatically when the condition clears, and can be acknowledged while still firing. History
-is kept for 90 days. Thresholds are editable at runtime; notifications go to a Telegram bot and/or a generic webhook
-(`{event, text, alert}`) with a test button in the UI. Notifications are best-effort and never block evaluation.
+is kept for 90 days. Thresholds are editable at runtime; notifications go to Telegram, a generic
+webhook, ntfy, Gotify, Discord, Slack and SMTP email, with a test button in the UI. Quiet hours and a
+maintenance-until timestamp suppress external messages without hiding alerts in the panel.
+Notifications are best-effort and never block evaluation.
+
+### 7.6 Observability
+
+- **Live logs.** `GET /api/projects/{id}/logs/stream` upgrades to a WebSocket and tails the app log
+  through the existing `app.logs` request using byte offsets, one poll per second. The agent returns
+  `offset/next/size` so only new bytes travel; a size regression marks the file as rotated and the
+  control plane tells the browser to reset. The stream is admin-only and origin-checked, and it uses
+  the same auth cookie as the panel.
+- **Per-app metrics.** Each heartbeat's `AppStatus` carries `hasUsage`, `cpuPercent` and `rss` for the
+  supervised process group. The agent scans `/proc` once per heartbeat, sums the group's `utime+stime`
+  and RSS, and converts tick deltas to a CPU percentage. The control plane stores at most one row per
+  project per 15 seconds in `app_metrics`; the chart endpoint downsamples like host metrics.
+- **Request logs.** The public project proxy wraps the response writer, measures status/bytes/duration,
+  and enqueues `request_logs` asynchronously (bounded queue, drop on overload). WebSocket upgrades are
+  not logged because the connection is hijacked; LAN/direct traffic never reaches this path.
+- **Cost.** Observability never blocks request handling. Per-app samples add one small row per app per
+  heartbeat; request logs are pruned after 7 days and bounded by the async queue.
 
 ## 8. Networking and Cloudflare
 
@@ -360,17 +438,19 @@ is kept for 90 days. Thresholds are editable at runtime; notifications go to a T
 | Boundary | Control |
 |---|---|
 | Public → panel | Cloudflare Access (recommended) + token login with signed, HttpOnly, SameSite=Lax cookie (30 days), optional TOTP second factor; scoped `admin`/`viewer` API tokens, with viewer tokens restricted to read-only fleet views |
+| Git provider → webhook | per-project secret encrypted at rest; GitHub HMAC-SHA256 (`X-Hub-Signature-256`) or GitLab token (`X-Gitlab-Token`) compared in constant time; only a push to the configured branch deploys; `/hooks/*` is an Access bypass path |
 | Agent → control plane | the shared token enrolls a phone once; the control plane then issues a per-device token (stored as a SHA-256 hash) that the agent uses for control, data, source and backup connections. Tokens are compared in constant time, are never accepted by the panel API, and are passed by file (`--token-file`) rather than argv |
 | Panel → files | paths resolved with `EvalSymlinks` and checked against allowed roots on every operation; root directories cannot be deleted |
 | Panel → shell | full shell as the Termux user, by design; the UI is the trust boundary |
 | Host header | after setup, unknown public hostnames return 404 instead of the panel; loopback and private IPs stay allowed; known project hosts are proxied before the panel mux |
-| Panel → apps | only allocated ports are reachable; the session cookie and panel bearer tokens are stripped; hop-by-hop headers removed |
+| Panel → apps | only allocated ports are reachable; the session cookie and panel bearer tokens are stripped; hop-by-hop headers removed; optional per-project HTTP Basic auth is checked before tunneling |
+| Project secret files | content is encrypted with the control-plane key, sent only over the agent connection, and written 0600 under `$PHLEET_SECRETS_DIR`; names are validated and deleted files are removed on the next deploy |
 | Panel → databases | engine binds `127.0.0.1` only; passwords are SCRAM/`requirepass`, generated per addon and encrypted at rest; the console runs as the Termux user behind the admin session |
 | Agent → addon files | the agent rejects any data directory outside `$HOME/phleet/data`; a purge requires an explicit flag from the control plane |
 | PC → database bridge | binds `127.0.0.1` by default; `-bridge-lan` is an explicit opt-in and the engine still requires its password |
 | Phone → phone relay | the control plane only forwards a relay stream when an `addon_relays` row authorizes that addon on that phone, and the target is the current primary's protocol port |
 | Source bundles | uploaded zips live under `%ProgramData%\phleet\bundles` and are served only to authenticated agents/admins; they are not encrypted at rest |
-| Addon backups | dumps live under `%ProgramData%\phleet\backups`, are encrypted at rest with chunked AES-256-GCM, carry a plaintext SHA-256, and are removed with the addon |
+| Addon backups | dumps live under `%ProgramData%\phleet\backups`, are encrypted at rest with chunked AES-256-GCM, carry a plaintext SHA-256, and are removed with the addon; off-site copies are the same encrypted file plus non-secret metadata, uploaded by rclone using credentials that stay in the rclone config |
 | Data at rest | SQLite and tokens under `%ProgramData%\phleet`, outside OneDrive; project env encrypted with AES-256-GCM; tokens are file-permission protected |
 | Agent updates | Ed25519-signed manifest at `/api/agent/update`, pinned public key in `update.pub`, SHA-256 plus signature verification, atomic rename and `exec` on the phone |
 | Audit | connection, exec, file write/upload/delete, terminal, project create/delete and deploy lifecycle events are recorded |
@@ -381,7 +461,7 @@ Known gaps (acceptable for a personal fleet, not for a team): the enrollment tok
 
 | Failure | Behaviour |
 |---|---|
-| Windows PC sleeps | Public URLs and the panel disappear. Agents keep running and supervising apps; metrics and logs buffer briefly on the device and are dropped beyond a cap. On wake, agents reconnect with jitter and the UI shows gaps, not fake zeros. |
+| Windows PC sleeps | Public URLs and the panel disappear. Agents keep running and supervising apps; metrics and logs buffer briefly on the device and are dropped beyond a cap. On wake, agents reconnect with jitter and the UI shows gaps, not fake zeros. Scheduled tasks keep running from the agent's local copy. |
 | Agent crashes | Termux service supervisor (`runit`) or the boot hook restarts it; the panel shows the phone offline after 45 s. Supervised apps keep running and are re-adopted (or replaced) on restart; a port still held by the old process is detected and that orphan is killed before a new release starts. |
 | Phone reboots | Termux:Boot hook restarts the agent; apps are restored from `~/.phleet/apps.json`; the server row is reused by stable agent id. |
 | Deploy health fails | The new release is stopped, the previous release is started and health-checked, and the deployment is marked `rolled_back`. |
@@ -402,6 +482,7 @@ Known gaps (acceptable for a personal fleet, not for a team): the enrollment tok
 | Demoted copy removed | `DELETE /addons/{id}/placement/{serverId}` stops the process, purges its data and removes the row, so the phone can be re-added as a standby. |
 | Whole request > 96 MB to S3 | The proxy returns 413. S3 clients should use multipart uploads (default for large objects). |
 | Control plane restarts | All agents reconnect within seconds; `servers` are reset to offline at boot to avoid stale "online" badges. |
+| Control-plane host lost | Off-site copies can be fetched back with rclone; if the SQLite database is also lost, the metadata sidecar next to each dump identifies the addon, engine, size and checksum for a manual import. |
 | Clock skew | Timestamps come from the control plane for storage; agent heartbeat time is advisory. |
 
 ## 11. Android constraints and mitigations
@@ -449,6 +530,7 @@ Known gaps (acceptable for a personal fleet, not for a team): the enrollment tok
 
 ## 13. Roadmap
 
-1. Data: bucket mirroring between two phones; per-addon quotas; active engine health probes for hung processes.
-2. Per-device tokens, API tokens and RBAC, audit export.
-3. Build caching, scheduled jobs, restore drills, mobile-friendly panel polish.
+1. Data: bucket mirroring; enforced per-addon quotas; active health probes for hung processes.
+2. Observability: live log streaming, per-app metrics and request logs.
+3. Delivery: preview environments per branch; audit export, per-project RBAC and OIDC.
+4. Fleet: batch commands, phone retire/wipe, upgrade rollout; mobile-friendly panel polish.
