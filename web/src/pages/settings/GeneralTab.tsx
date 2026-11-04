@@ -53,8 +53,9 @@ export default function GeneralTab({ me }: { me?: Me }) {
           </div>
         </div>
         <p className="mt-3 text-[10px] leading-relaxed text-zinc-600">
-          Tokens are generated once and never leave the host through the API. Rotate by deleting the file and
-          restarting phleetd — every agent must be re-bootstrapped afterwards.
+          Tokens are generated once. Run <span className="font-mono">phleet token -rotate</span> to write a new
+          token file, then restart phleetd. Rotating the agent token does not affect phones that are already
+          enrolled (they use per-device tokens); new phones need the new token.
         </p>
       </Card>
 

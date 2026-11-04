@@ -154,7 +154,7 @@ export default function Login() {
           The token lives on the control plane at{' '}
           <span className="font-mono text-zinc-500">%ProgramData%\phleet\admin_token</span>
           <br />
-          Rotate it with <span className="font-mono text-zinc-500">phleet token</span>.
+          Print or rotate it with <span className="font-mono text-zinc-500">phleet token -rotate</span>.
         </p>
       </div>
     </div>

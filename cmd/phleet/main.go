@@ -5,6 +5,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -63,7 +65,8 @@ func usage() {
 
   phleet doctor [flags]        Check tunnel, DNS and local control plane health.
   phleet servers [flags]       List registered phones.
-  phleet token [-which admin|agent|both]
+  phleet token [-which admin|agent|both] [-rotate]
+                               Print tokens, or generate new token file(s)
   phleet backup [-out FILE]    Write a consistent snapshot of phleet.db
   phleet deploy -project ID [-ref REF] [-wait]
   phleet logs -project ID [-server ID] [-bytes N]
@@ -404,19 +407,57 @@ func printTokens(args []string) int {
 	fs := flag.NewFlagSet("token", flag.ExitOnError)
 	dataDir := fs.String("data", config.DefaultDataDir(), "data directory")
 	which := fs.String("which", "both", "admin|agent|both")
+	rotate := fs.Bool("rotate", false, "generate new token(s) and write the token file(s)")
 	_ = fs.Parse(args)
+	if *which != "admin" && *which != "agent" && *which != "both" {
+		fmt.Fprintln(os.Stderr, "error: -which must be admin, agent or both")
+		return 2
+	}
 	cfg, err := config.Load(*dataDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
+	tokens := map[string]string{
+		"admin": cfg.AdminToken,
+		"agent": cfg.AgentToken,
+	}
+	if *rotate {
+		for _, target := range []struct{ name, file string }{
+			{"admin", config.AdminFile},
+			{"agent", config.AgentFile},
+		} {
+			if *which != "both" && *which != target.name {
+				continue
+			}
+			tok, err := rotateTokenFile(filepath.Join(cfg.DataDir, target.file))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				return 1
+			}
+			tokens[target.name] = tok
+		}
+		fmt.Fprintln(os.Stderr, "token file(s) updated; restart phleetd for the new token to take effect")
+	}
 	if *which == "admin" || *which == "both" {
-		fmt.Println(cfg.AdminToken)
+		fmt.Println(tokens["admin"])
 	}
 	if *which == "agent" || *which == "both" {
-		fmt.Println(cfg.AgentToken)
+		fmt.Println(tokens["agent"])
 	}
 	return 0
+}
+
+func rotateTokenFile(path string) (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	tok := hex.EncodeToString(buf)
+	if err := os.WriteFile(path, []byte(tok+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	return tok, nil
 }
 
 func backupDB(args []string) int {
