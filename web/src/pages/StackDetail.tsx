@@ -17,7 +17,7 @@ import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api } from '../api'
 import { ConfirmDialog } from '../components/Dialog'
-import { Badge, Button, Card, DeployBadge, EmptyState, Spinner } from '../components/ui'
+import { Badge, Button, Card, DeployBadge, EmptyState, PageLoader, Spinner } from '../components/ui'
 import WebhookCard from '../components/WebhookCard'
 import { ago } from '../lib/format'
 import { aggregateStatus } from '../lib/projects'
@@ -147,7 +147,7 @@ export default function StackDetail() {
     },
   })
 
-  if (query.isLoading) return <div className="p-8 text-xs text-zinc-500">loading stack…</div>
+  if (query.isLoading) return <PageLoader label="Loading stack" />
   if (query.isError || !query.data) {
     return (
       <div className="p-8">

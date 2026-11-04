@@ -27,7 +27,7 @@ import FilesTab from '../components/FilesTab'
 import { PromptDialog, ConfirmDialog } from '../components/Dialog'
 import ProcessesTab from '../components/ProcessesTab'
 import TerminalTab from '../components/TerminalTab'
-import { Badge, Bar, Button, Card, KeyValue, Sparkline, Spinner, StatusDot, cn } from '../components/ui'
+import { Badge, Bar, Button, Card, KeyValue, PageLoader, Sparkline, Spinner, StatusDot, cn } from '../components/ui'
 import { ago, bytes, pct, temp, time, uptime } from '../lib/format'
 import type { Server } from '../types'
 
@@ -72,7 +72,7 @@ export default function ServerDetail() {
   })
 
   if (query.isLoading) {
-    return <div className="p-8 text-xs text-zinc-500">loading server…</div>
+    return <PageLoader label="Loading phone" />
   }
   if (query.isError || !query.data) {
     return (

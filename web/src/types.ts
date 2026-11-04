@@ -171,6 +171,8 @@ export interface Project {
   slug: string
   repo: string
   branch: string
+  gitAuthType?: 'https' | 'ssh' | ''
+  gitAuthUsername?: string
   runtime: string
   buildCmd: string
   startCmd: string
@@ -200,6 +202,7 @@ export interface ProjectView extends Project {
   url: string
   webhook?: boolean
   basicAuth?: boolean
+  gitAuth?: boolean
 }
 
 export interface EngineInfo {

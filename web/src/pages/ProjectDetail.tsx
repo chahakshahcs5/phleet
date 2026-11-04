@@ -27,7 +27,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api'
 import type { Deployment, ProjectView } from '../types'
 import { ConfirmDialog, Dialog } from '../components/Dialog'
-import { Badge, Button, Card, DeployBadge, EmptyState, KeyValue, Sparkline, Spinner, cn } from '../components/ui'
+import { Badge, Button, Card, DeployBadge, EmptyState, KeyValue, PageLoader, Sparkline, Spinner, cn } from '../components/ui'
 import WebhookCard from '../components/WebhookCard'
 import { ago, bytes, time } from '../lib/format'
 import { envToString, parseEnv } from '../lib/env'
@@ -91,6 +91,9 @@ export default function ProjectDetail() {
   })
 
   const project = query.data?.project
+  const parentId = project?.parentId ?? ''
+  const backTo = parentId ? `/stacks/${parentId}` : '/projects'
+  const backLabel = parentId ? 'stack' : 'projects'
   const anyOnline = project?.placements.some((p) => p.online) ?? false
 
   useEffect(() => {
@@ -142,16 +145,16 @@ export default function ProjectDetail() {
     mutationFn: () => api.deleteProject(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['projects'] })
-      navigate('/projects')
+      navigate(backTo)
     },
   })
 
-  if (query.isLoading) return <div className="p-8 text-xs text-zinc-500">loading project…</div>
+  if (query.isLoading) return <PageLoader label="Loading project" />
   if (query.isError || !project) {
     return (
       <div className="p-8">
-        <Link to="/projects" className="text-xs text-zinc-500 hover:text-zinc-300">
-          ← projects
+        <Link to={backTo} className="text-xs text-zinc-500 hover:text-zinc-300">
+          ← {backLabel}
         </Link>
         <div className="mt-4 text-sm text-red-400">{String((query.error as Error)?.message || 'project not found')}</div>
       </div>
@@ -182,17 +185,9 @@ export default function ProjectDetail() {
     <div className="flex min-h-full flex-col">
       <div className="border-b border-zinc-800/70 bg-zinc-950/60 px-4 pt-4 md:px-8">
         <div className="flex items-center gap-1 text-[11px] text-zinc-500">
-          <Link to="/projects" className="inline-flex items-center gap-1 hover:text-zinc-300">
-            <ArrowLeft size={12} /> projects
+          <Link to={backTo} className="inline-flex items-center gap-1 hover:text-zinc-300">
+            <ArrowLeft size={12} /> {backLabel}
           </Link>
-          {project.parentId ? (
-            <>
-              <span className="text-zinc-700">/</span>
-              <Link to={`/stacks/${project.parentId}`} className="hover:text-zinc-300">
-                stack
-              </Link>
-            </>
-          ) : null}
         </div>
         <div className="mt-2 flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
@@ -1196,6 +1191,11 @@ function SettingsTab({
   const [basicUser, setBasicUser] = useState(project.basicAuthUser ?? '')
   const [basicPass, setBasicPass] = useState('')
   const [clearBasic, setClearBasic] = useState(false)
+  const [gitAuthType, setGitAuthType] = useState<'none' | 'https' | 'ssh'>(
+    project.gitAuthType === 'https' || project.gitAuthType === 'ssh' ? project.gitAuthType : 'none',
+  )
+  const [gitAuthUser, setGitAuthUser] = useState(project.gitAuthUsername ?? '')
+  const [gitAuthSecret, setGitAuthSecret] = useState('')
 
   const uploadSource = useMutation({
     mutationFn: async () => {
@@ -1222,6 +1222,9 @@ function SettingsTab({
         name: form.name,
         repo: form.repo,
         branch: form.branch,
+        gitAuthType: gitAuthType === 'none' ? 'none' : gitAuthType,
+        gitAuthUsername: gitAuthUser,
+        gitAuthSecret: gitAuthSecret,
         buildCmd: form.buildCmd,
         startCmd: form.startCmd,
         staticDir: form.staticDir,
@@ -1236,6 +1239,7 @@ function SettingsTab({
         pinnedServer: form.pinned,
       }),
     onSuccess: () => {
+      setGitAuthSecret('')
       qc.invalidateQueries({ queryKey: ['project', project.id] })
       qc.invalidateQueries({ queryKey: ['projects'] })
     },
@@ -1264,6 +1268,55 @@ function SettingsTab({
                 <div className={caption}>Git repository</div>
                 <input className={`${field} mt-1 font-mono`} value={form.repo} onChange={(e) => setForm({ ...form, repo: e.target.value })} />
               </div>
+              {!project.parentId ? (
+                <div className="sm:col-span-2 rounded-lg border border-zinc-800/70 bg-zinc-950/40 p-3">
+                  <div className={caption}>Repository access</div>
+                  <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                    <select
+                      className={field}
+                      value={gitAuthType}
+                      onChange={(e) => setGitAuthType(e.target.value as 'none' | 'https' | 'ssh')}
+                    >
+                      <option value="none">Public repository / no auth</option>
+                      <option value="https">HTTPS token or password</option>
+                      <option value="ssh">SSH private key</option>
+                    </select>
+                    {gitAuthType === 'https' ? (
+                      <input
+                        className={`${field} font-mono`}
+                        value={gitAuthUser}
+                        onChange={(e) => setGitAuthUser(e.target.value)}
+                        placeholder="username (default: git)"
+                        autoComplete="username"
+                      />
+                    ) : null}
+                  </div>
+                  {gitAuthType === 'https' ? (
+                    <input
+                      type="password"
+                      className={`${field} mt-2 font-mono`}
+                      value={gitAuthSecret}
+                      onChange={(e) => setGitAuthSecret(e.target.value)}
+                      placeholder={project.gitAuth ? 'configured — leave blank to keep' : 'personal access token or password'}
+                      autoComplete="new-password"
+                    />
+                  ) : null}
+                  {gitAuthType === 'ssh' ? (
+                    <textarea
+                      className="mt-2 h-28 w-full resize-y rounded-lg border border-zinc-800 bg-zinc-950/70 p-3 font-mono text-[11px] text-zinc-200 outline-none focus:border-emerald-400/40"
+                      value={gitAuthSecret}
+                      onChange={(e) => setGitAuthSecret(e.target.value)}
+                      placeholder={project.gitAuth ? 'key configured — paste a new key to replace it' : '-----BEGIN OPENSSH PRIVATE KEY-----'}
+                      spellCheck={false}
+                    />
+                  ) : null}
+                  <p className="mt-2 text-[10px] leading-relaxed text-zinc-600">
+                    Credentials are encrypted on the control plane and sent only to the phone during clone/fetch. Leave
+                    the secret blank to keep the existing value. SSH keys must be unencrypted and accepted by the remote
+                    host.
+                  </p>
+                </div>
+              ) : null}
             </>
           ) : null}
           {project.kind === 'static' ? (

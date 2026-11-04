@@ -17,17 +17,13 @@ import StackDetail from './pages/StackDetail'
 import ServerDetail from './pages/ServerDetail'
 import Settings from './pages/Settings'
 import Tasks from './pages/Tasks'
-import { Button, Spinner } from './components/ui'
+import { Button, FullScreenLoader } from './components/ui'
 
 export default function App() {
   const me = useQuery({ queryKey: ['me'], queryFn: api.me, retry: false, staleTime: 30_000 })
 
   if (me.isLoading) {
-    return (
-      <div className="grid h-full place-items-center">
-        <Spinner className="h-6 w-6" />
-      </div>
-    )
+    return <FullScreenLoader label="Connecting to phleet" />
   }
 
   if (me.isError) {

@@ -31,7 +31,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api'
 import { ConfirmDialog, Dialog } from '../components/Dialog'
-import { Badge, Button, Card, DeployBadge, KeyValue, Spinner, cn } from '../components/ui'
+import { Badge, Button, Card, DeployBadge, KeyValue, PageLoader, Spinner, cn } from '../components/ui'
 import { ago, bytes, time } from '../lib/format'
 
 type Tab = 'overview' | 'console' | 'backups' | 'logs'
@@ -228,7 +228,7 @@ export default function AddonDetail() {
     },
   })
 
-  if (query.isLoading) return <div className="p-8 text-xs text-zinc-500">loading addon…</div>
+  if (query.isLoading) return <PageLoader label="Loading addon" />
   if (query.isError || !addon) {
     return (
       <div className="p-8">

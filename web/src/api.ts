@@ -204,6 +204,9 @@ export const api = {
     kind?: string
     repo: string
     branch: string
+    gitAuthType?: 'https' | 'ssh' | 'none' | ''
+    gitAuthUsername?: string
+    gitAuthSecret?: string
     buildCmd: string
     startCmd: string
     staticDir?: string
@@ -221,6 +224,9 @@ export const api = {
     name: string
     repo: string
     branch: string
+    gitAuthType: 'https' | 'ssh' | 'none' | ''
+    gitAuthUsername: string
+    gitAuthSecret: string
     buildCmd: string
     startCmd: string
     staticDir: string

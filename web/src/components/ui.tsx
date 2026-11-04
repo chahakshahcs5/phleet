@@ -93,7 +93,64 @@ export function Spinner({ className }: { className?: string }) {
         'inline-block h-4 w-4 animate-spin rounded-full border-2 border-zinc-700 border-t-emerald-400',
         className,
       )}
+      aria-hidden="true"
     />
+  )
+}
+
+export function Skeleton({ className }: { className?: string }) {
+  return <div className={cn('animate-pulse rounded-md bg-zinc-800/70', className)} aria-hidden="true" />
+}
+
+/** Page-level loading state with real layout instead of a single line of text. */
+export function PageLoader({
+  label = 'Loading',
+  cards = 3,
+  className,
+}: {
+  label?: string
+  cards?: number
+  className?: string
+}) {
+  return (
+    <div
+      className={cn('mx-auto w-full max-w-6xl px-4 py-8 md:px-8', className)}
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+    >
+      <div className="flex items-center gap-2 text-xs text-zinc-500">
+        <Spinner className="h-3.5 w-3.5" />
+        <span>{label}</span>
+      </div>
+      <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {Array.from({ length: Math.max(1, cards) }, (_, i) => (
+          <div
+            key={i}
+            className="rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-4 backdrop-blur-sm"
+          >
+            <Skeleton className="h-2.5 w-20" />
+            <Skeleton className="mt-3 h-5 w-36" />
+            <Skeleton className="mt-4 h-2.5 w-full" />
+            <Skeleton className="mt-2 h-2.5 w-2/3" />
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** Branded first-paint loader used while the panel checks the session. */
+export function FullScreenLoader({ label = 'Loading' }: { label?: string }) {
+  return (
+    <div className="grid min-h-full place-items-center px-6" role="status" aria-live="polite" aria-busy="true">
+      <div className="flex flex-col items-center gap-3">
+        <div className="grid h-11 w-11 place-items-center rounded-2xl bg-emerald-400/10 ring-1 ring-emerald-400/25">
+          <Spinner className="h-5 w-5" />
+        </div>
+        <div className="text-xs text-zinc-500">{label}</div>
+      </div>
+    </div>
   )
 }
 
