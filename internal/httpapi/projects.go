@@ -61,6 +61,8 @@ type projectView struct {
 	GitAuth    bool              `json:"gitAuth"`
 }
 
+const deployOfflineDetail = "phone went offline during deployment"
+
 func isTerminalDeploy(s string) bool {
 	switch s {
 	case "active", "failed", "rolled_back":
@@ -1946,12 +1948,41 @@ func (s *Server) syncAppStatus(serverID string, app agentproto.AppStatus) {
 	}
 	if app.DeploymentID != "" && app.DeployStatus != "" {
 		dep, err := s.st.GetDeployment(app.DeploymentID)
-		if err != nil || isTerminalDeploy(dep.Status) {
+		if err != nil {
+			return
+		}
+		offlineFailed := dep.Status == "failed" && strings.HasPrefix(dep.Detail, deployOfflineDetail)
+		if isTerminalDeploy(dep.Status) && !offlineFailed {
 			return
 		}
 		if isTerminalDeploy(app.DeployStatus) {
-			_ = s.st.FinishDeployment(app.DeploymentID, app.DeployStatus, dep.Release, app.LastError)
+			detail := app.LastError
+			if app.DeployStatus == "active" && offlineFailed && detail == "" {
+				detail = "recovered after the phone came back online"
+			} else if detail == "" && offlineFailed {
+				detail = dep.Detail
+			}
+			_ = s.st.FinishDeployment(app.DeploymentID, app.DeployStatus, dep.Release, detail)
+			switch app.DeployStatus {
+			case "active":
+				_ = s.st.UpdatePlacementStatusFor(dep.ProjectID, serverID, "running", app.PID, app.Restarts, app.LastError, dep.Release)
+				s.startDeployAlertResolve(dep.ProjectID)
+			case "rolled_back":
+				_ = s.st.UpdatePlacementStatusFor(dep.ProjectID, serverID, "running", app.PID, app.Restarts, app.LastError, dep.Release)
+				s.startDeployAlertResolve(dep.ProjectID)
+			case "failed":
+				_ = s.st.UpdatePlacementStatusFor(dep.ProjectID, serverID, "failed", app.PID, app.Restarts, detail, dep.Release)
+			}
 			_ = s.st.AddEvent("agent", "deploy."+app.DeployStatus, dep.ProjectID, "recovered from heartbeat")
+			s.triggerReconcile()
+			return
+		}
+		if offlineFailed {
+			// The phone kept building while its network was down. Reopen the
+			// deployment until the agent reports a terminal state again.
+			_ = s.st.UpdateDeploymentStatus(app.DeploymentID, app.DeployStatus, dep.Release, "")
+			_ = s.st.UpdatePlacementStatusFor(dep.ProjectID, serverID, "deploying", app.PID, app.Restarts, "", dep.Release)
+			_ = s.st.AddEvent("agent", "deploy.resumed", dep.ProjectID, "phone reconnected during deployment")
 			s.triggerReconcile()
 		}
 	}

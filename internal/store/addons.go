@@ -408,6 +408,25 @@ func (s *Store) OwnedAddons(projectID string) ([]model.Addon, error) {
 	return out, rows.Err()
 }
 
+// ListRunningBackupsForServer returns backups that were uploading when a
+// phone disappeared.
+func (s *Store) ListRunningBackupsForServer(serverID string) ([]model.Backup, error) {
+	rows, err := s.db.Query(`SELECT `+backupCols+` FROM backups WHERE server_id=? AND status='running'`, serverID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.Backup{}
+	for rows.Next() {
+		b, err := s.scanBackup(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
 // ---- logs ----
 
 func (s *Store) AddAddonLog(addonID, line string) error {

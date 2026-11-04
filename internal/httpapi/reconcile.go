@@ -74,6 +74,25 @@ func (s *Server) reconcileAll() {
 	}
 }
 
+// failInflightDeployments closes deployments that cannot report progress while
+// the phone is offline. It is called after the reconnect grace expires, so a
+// short network blip does not fail a deploy that is still running locally.
+func (s *Server) failInflightDeployments(serverID, detail string) {
+	list, err := s.st.ListInflightDeploymentsForServer(serverID)
+	if err != nil {
+		s.log.Warn("list inflight deployments", "server", serverID, "err", err)
+		return
+	}
+	for _, d := range list {
+		_ = s.st.FinishDeployment(d.ID, "failed", d.Release, detail)
+		_ = s.st.UpdatePlacementStatusFor(d.ProjectID, serverID, "failed", 0, 0, detail, d.Release)
+		_ = s.st.AddEvent("agent", "deploy.offline", d.ProjectID, detail)
+	}
+	if len(list) > 0 {
+		s.triggerReconcile()
+	}
+}
+
 // expireStaleDeployments unblocks scheduling when an agent vanished mid-deploy.
 func (s *Server) expireStaleDeployments(p model.Project) {
 	list, err := s.st.ListDeployments(p.ID, 20)

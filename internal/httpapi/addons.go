@@ -2021,6 +2021,36 @@ func (s *Server) handleAddonQuery(w http.ResponseWriter, r *http.Request) {
 
 // ---- heartbeat + reconcile helpers ----
 
+// failOfflineAddonWork closes asynchronous addon operations that cannot finish
+// without the phone. A heartbeat after reconnect can still move a provisioning
+// or restoring addon back to running.
+func (s *Server) failOfflineAddonWork(serverID string) {
+	addons, err := s.st.ListAddons()
+	if err != nil {
+		return
+	}
+	for _, a := range addons {
+		if a.PinnedServer != serverID {
+			continue
+		}
+		if a.Status == "provisioning" || a.Status == "restoring" {
+			detail := "phone went offline during " + a.Status
+			_ = s.st.SetAddonStatus(a.ID, "failed", detail)
+			_ = s.st.UpdateAddonPlacementStatus(a.ID, serverID, "failed", 0, 0, detail)
+			_ = s.st.AddEvent("agent", "addon.offline", a.ID, detail)
+		}
+	}
+	backups, err := s.st.ListRunningBackupsForServer(serverID)
+	if err != nil {
+		return
+	}
+	for _, b := range backups {
+		detail := "phone went offline during backup"
+		_ = s.st.FinishBackup(b.ID, "failed", 0, "", detail)
+		_ = s.st.AddEvent("agent", "backup.offline", b.AddonID, detail)
+	}
+}
+
 func (s *Server) syncAddonStatus(serverID string, app agentproto.AppStatus) (bool, error) {
 	a, err := s.st.GetAddonBySlug(app.Slug)
 	if err != nil {

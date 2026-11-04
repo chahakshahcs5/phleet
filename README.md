@@ -193,9 +193,11 @@ health check → switch the public-port switchboard → symlink `current` → dr
 releases. The deploy plan may carry a branch, tag or commit ref; a commit that is not the branch tip is fetched with
 `git fetch --depth 1 origin <sha>`. The public port never closes, so new HTTP/WebSocket connections go to the healthy release. Existing
 long-lived connections on the old release get a 30-second drain. If the new release fails its check, the old release
-keeps serving and the deployment is marked `rolled_back`. The first deploy after upgrading from an older agent briefly
-restarts the app once to move it behind the switchboard. A phone that reboots re-supervises its apps from
-`~/.phleet/apps.json`.
+keeps serving and the deployment is marked `rolled_back`. If the phone disappears mid-deploy, the control plane waits
+a short reconnect grace, then marks the deployment `failed` with `phone went offline during deployment` so CI does not
+wait for the stale-deploy sweep; a heartbeat after reconnect can still recover the row if the release actually finished.
+The first deploy after upgrading from an older agent briefly restarts the app once to move it behind the switchboard.
+A phone that reboots re-supervises its apps from `~/.phleet/apps.json`.
 
 Uploaded projects can replace their source later under **Project → Settings → Source** (upload a new folder, then
 Deploy). Source archives are capped at 64 MB; empty directories are not preserved.

@@ -330,7 +330,7 @@ func (s *Store) SetDeploymentCommit(id, commit string) error {
 }
 
 func (s *Store) UpdateDeploymentStatus(id, status, release, detail string) error {
-	_, err := s.db.Exec(`UPDATE deployments SET status=?, release=?, detail=? WHERE id=?`, status, release, detail, id)
+	_, err := s.db.Exec(`UPDATE deployments SET status=?, release=?, detail=?, finished_at=0 WHERE id=?`, status, release, detail, id)
 	return err
 }
 
@@ -357,6 +357,29 @@ func (s *Store) ListDeployments(projectID string, limit int) ([]model.Deployment
 	}
 	rows, err := s.db.Query(`SELECT id,project_id,server_id,commit_sha,status,release,started_at,finished_at,detail
 FROM deployments WHERE project_id=? ORDER BY started_at DESC LIMIT ?`, projectID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.Deployment{}
+	for rows.Next() {
+		var d model.Deployment
+		if err := rows.Scan(&d.ID, &d.ProjectID, &d.ServerID, &d.CommitSHA, &d.Status, &d.Release,
+			&d.StartedAt, &d.FinishedAt, &d.Detail); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// ListInflightDeploymentsForServer returns non-terminal deployments for one
+// phone. Used when an agent disappears so CI/UI do not keep polling a deploy
+// that can no longer report progress.
+func (s *Store) ListInflightDeploymentsForServer(serverID string) ([]model.Deployment, error) {
+	rows, err := s.db.Query(`SELECT id,project_id,server_id,commit_sha,status,release,started_at,finished_at,detail
+FROM deployments WHERE server_id=? AND status NOT IN ('active','failed','rolled_back')
+ORDER BY started_at`, serverID)
 	if err != nil {
 		return nil, err
 	}

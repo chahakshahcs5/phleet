@@ -226,6 +226,10 @@ func (s *Server) markOffline(id string) {
 	if err := s.st.SetServerOffline(id); err != nil {
 		s.log.Warn("mark offline", "err", err, "server", id)
 	}
+	// A deploy that was mid-flight can no longer be observed. Fail it now so
+	// CI and the panel do not wait for the 20-minute stale-deploy sweep.
+	s.failInflightDeployments(id, deployOfflineDetail)
+	s.failOfflineAddonWork(id)
 	detail := id
 	if srv.Name != "" {
 		detail = srv.Name

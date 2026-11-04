@@ -38,6 +38,13 @@ The latest deployment includes `status` (`queued`, `building`, `starting`,
 `health_check`, `active`, `rolled_back`, `failed`), `startedAt`, `finishedAt`,
 `release` and `commitSha` for git sources.
 
+If the phone disconnects during a deployment, the control plane marks the
+deployment `failed` with `phone went offline during deployment` after a short
+reconnect grace. A CI job polling for a terminal state exits non-zero instead of
+waiting for the 20-minute stale-deploy sweep. If the phone reconnects and the
+release did in fact finish, the heartbeat can recover the row to `active` or
+`rolled_back`; inspect the deployment before retrying blindly.
+
 ## Deploy a commit, tag or branch
 
 Send a JSON body with `ref`:
