@@ -520,6 +520,7 @@ func totpCommand(args []string) int {
 	defer st.Close()
 	_ = st.DeleteSetting("admin_totp_secret")
 	_ = st.DeleteSetting("admin_totp_pending")
+	_ = st.DeleteSetting("admin_totp_last_step")
 	fmt.Println("admin TOTP disabled")
 	return 0
 }
