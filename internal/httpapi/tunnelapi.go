@@ -189,7 +189,8 @@ func normalizeHost(h string) string {
 	if host, _, err := net.SplitHostPort(h); err == nil {
 		h = host
 	}
-	return strings.ToLower(strings.TrimSuffix(h, "."))
+	h = strings.ToLower(strings.TrimSuffix(h, "."))
+	return strings.Trim(h, "[]")
 }
 
 func (s *Server) proxyProject(w http.ResponseWriter, r *http.Request) bool {

@@ -6,6 +6,19 @@ import (
 	"testing"
 )
 
+func TestNormalizeHost(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"Fleet.Example.com.:8080", "fleet.example.com"},
+		{"[::1]:8080", "::1"},
+		{"[::1]", "::1"},
+		{"localhost", "localhost"},
+	} {
+		if got := normalizeHost(tc.in); got != tc.want {
+			t.Fatalf("normalizeHost(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestHostGuardCoversPanelAndPublicURLOnly(t *testing.T) {
 	s := testServer(t)
 	s.SetEdge("https://panel.example.com", "fleet.example.com")
