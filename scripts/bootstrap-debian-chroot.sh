@@ -114,21 +114,16 @@ if ! chroot "$ROOT" getent group 3003 >/dev/null 2>&1; then
 fi
 chroot "$ROOT" usermod -aG inet "$USER_NAME" || warn "could not add $USER_NAME to the inet group"
 
-# The agent stays unprivileged (PostgreSQL will not run as root), but apt still
-# needs root. Allow exactly the package-manager commands, nothing else.
-if ! chroot "$ROOT" /bin/sh -c 'command -v sudo' >/dev/null 2>&1; then
-  say "installing sudo (package installs need root; the agent stays unprivileged)"
-  chroot "$ROOT" /bin/sh -c 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y sudo' \
-    || die "could not install sudo inside the chroot"
+# Older phleet bootstraps granted the agent user passwordless sudo for
+# apt-get/apt/dpkg. That made every project running as $USER_NAME root-equivalent
+# (a .deb maintainer script runs as root). Remove that legacy rule. Packaged
+# engines can still be installed once as root from the host, or preinstalled
+# with --with; engines with static installers do not need root.
+LEGACY_SUDOERS="$ROOT/etc/sudoers.d/phleet"
+if [ -f "$LEGACY_SUDOERS" ] && grep -q 'package management only' "$LEGACY_SUDOERS" 2>/dev/null; then
+  rm -f "$LEGACY_SUDOERS"
+  say "removed the legacy phleet sudoers rule (agent stays unprivileged)"
 fi
-cat > "$ROOT/etc/sudoers.d/phleet" <<EOF
-# phleet: package management only. The agent runs as this user so PostgreSQL can
-# start; apt and dpkg still need root.
-$USER_NAME ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg
-EOF
-chmod 440 "$ROOT/etc/sudoers.d/phleet"
-chroot "$ROOT" visudo -cf /etc/sudoers.d/phleet >/dev/null 2>&1 \
-  || die "the sudoers rule for $USER_NAME is invalid"
 
 # apt must never stop on a config prompt in an unattended chroot.
 mkdir -p "$ROOT/etc/apt/apt.conf.d"

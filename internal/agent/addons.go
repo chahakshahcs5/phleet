@@ -273,7 +273,7 @@ func (a *Agent) handleProvisionAddon(spec agentproto.AddonSpec, emit func(agentp
 				// root; use that instead of failing the install.
 				staticFallback = true
 			} else {
-				fail(fmt.Sprintf("%s needs apt, and this phone does not allow passwordless sudo for package management", eng.Name))
+				fail(fmt.Sprintf("%s needs apt; install it once as root on the phone, or use an engine with a static installer", eng.Name))
 				return
 			}
 		}

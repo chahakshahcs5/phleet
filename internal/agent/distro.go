@@ -30,10 +30,10 @@ func packageManager() string {
 }
 
 // canSudo reports whether the agent user can run package management as root
-// without a password. Inside a Debian chroot the agent is deliberately
-// unprivileged (so PostgreSQL can run), and the bootstrap's sudoers rule grants
-// apt-get/apt/dpkg only — not `true`. Testing `sudo -n true` therefore reported
-// pkgInstall=false even though apt worked.
+// without a password. The Debian bootstrap intentionally does not grant that
+// (the agent stays unprivileged so PostgreSQL can run), but an operator may
+// configure a narrow sudo rule themselves. Testing `sudo -n apt-get --version`
+// avoids relying on `sudo -n true`, which a command-scoped rule would reject.
 func canSudo() bool {
 	if os.Geteuid() == 0 {
 		return true
