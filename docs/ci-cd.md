@@ -132,9 +132,10 @@ deploy:
 
 ## Generic webhook relay
 
-If a provider sends a webhook, translate it in a tiny function/worker that
-calls the deploy endpoint. phleet does not currently verify GitHub/GitLab
-webhook signatures itself; the endpoint requires the deploy token instead.
+If a provider sends a webhook, translate it in a tiny function/worker that calls
+the deploy endpoint with a `deployer` API token. The native webhook endpoints
+already verify GitHub's `X-Hub-Signature-256` or GitLab's `X-Gitlab-Token`
+against the per-project secret; no deploy token is needed for those.
 
 ## Branches
 
