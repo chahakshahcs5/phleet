@@ -181,6 +181,8 @@ func (s *Server) onHeartbeat(id string, hb agentproto.Heartbeat) {
 			s.log.Debug("task status", "task", task.ID, "err", err)
 		}
 	}
+	// Deployments submitted while this phone was offline are sent now.
+	s.dispatchQueuedDeployments(id)
 }
 
 func (s *Server) onDisconnect(id string) {

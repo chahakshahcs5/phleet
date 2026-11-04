@@ -157,6 +157,7 @@ export interface Deployment {
   id: string
   projectId: string
   serverId: string
+  ref?: string
   commitSha: string
   status: string
   release: string

@@ -40,7 +40,10 @@ type Tab = 'overview' | 'deployments' | 'logs' | 'requests' | 'settings'
 const NON_TERMINAL = new Set(['queued', 'building', 'starting', 'health_check'])
 
 function duration(d: Deployment): string {
-  if (!d.finishedAt) return NON_TERMINAL.has(d.status) ? 'running…' : '—'
+  if (!d.finishedAt) {
+    if (d.status === 'queued' && d.detail.startsWith('waiting for the phone')) return 'waiting'
+    return NON_TERMINAL.has(d.status) ? 'running…' : '—'
+  }
   const s = Math.max(0, d.finishedAt - d.startedAt)
   if (s < 60) return `${s}s`
   return `${Math.floor(s / 60)}m ${s % 60}s`
@@ -162,7 +165,11 @@ export default function ProjectDetail() {
   }
 
   const status = aggregateStatus(project)
-  const latestBusy = project.latest ? NON_TERMINAL.has(project.latest.status) : false
+  const waitingForPhone =
+    project.latest?.status === 'queued' && project.latest.detail.includes('waiting for the phone')
+  // A request waiting for a phone is not actively deploying: allow a newer
+  // deploy to supersede it.
+  const latestBusy = project.latest ? NON_TERMINAL.has(project.latest.status) && !waitingForPhone : false
   const anyServerOnline = servers.data?.servers.some((s) => s.online) ?? false
   const hasSource = project.sourceType === 'upload' ? project.sourceSize > 0 : !!project.repo
   // A phone without Termux/userland can be watched but cannot build or run an
@@ -175,8 +182,15 @@ export default function ProjectDetail() {
       : (servers.data?.servers.filter((s) => s.online).length ?? 0) > 0 &&
         servers.data!.servers.filter((s) => s.online).every((s) => s.caps.userland === false)
   const kind = project.kind ?? 'app'
+  const stopped = status === 'stopped'
   const canDeploy =
-    hasSource && (kind === 'static' || !!project.startCmd) && anyServerOnline && !noUserland && !deploy.isPending && !latestBusy
+    hasSource &&
+    (kind === 'static' || !!project.startCmd) &&
+    (anyServerOnline || project.placements.length > 0) &&
+    !noUserland &&
+    !stopped &&
+    !deploy.isPending &&
+    !latestBusy
   const canAct = project.placements.length > 0 && anyOnline && !action.isPending
   const serverNames = [...new Set(project.placements.map((p) => p.serverName || p.serverId))].join(', ')
   const failedActions = action.data?.results.filter((r) => !r.ok) ?? []
@@ -230,7 +244,7 @@ export default function ProjectDetail() {
               ) : (
                 <Play size={12} />
               )}
-              {latestBusy ? 'Deploying…' : 'Deploy'}
+              {waitingForPhone ? 'Queue deploy' : latestBusy ? 'Deploying…' : 'Deploy'}
             </Button>
             <Button size="sm" disabled={!canAct} onClick={() => action.mutate('restart')}>
               <RotateCw size={12} /> Restart
@@ -258,6 +272,16 @@ export default function ProjectDetail() {
         ) : null}
         {deploy.data?.skipped.length ? (
           <div className="mt-2 text-[10px] text-amber-300">skipped offline replicas: {deploy.data.skipped.join(', ')}</div>
+        ) : null}
+        {stopped ? (
+          <div className="mt-2 text-[10px] text-amber-300">
+            This project is stopped. Start it before deploying; CI deploys are rejected while it stays stopped.
+          </div>
+        ) : null}
+        {!stopped && !anyServerOnline && project.placements.length > 0 ? (
+          <div className="mt-2 text-[10px] text-zinc-500">
+            The replica phones are offline. A deploy started now, or by CI, is queued and runs when a phone reconnects.
+          </div>
         ) : null}
         {action.isError ? <div className="mt-2 text-[11px] text-red-400">{String(action.error)}</div> : null}
         {failedActions.length ? (
@@ -377,7 +401,14 @@ export default function ProjectDetail() {
                     </div>
                   </div>
                   {detail.data.deployment.detail ? (
-                    <div className="border-b border-red-900/30 bg-red-500/5 px-3 py-2 text-[10px] text-red-300">
+                    <div
+                      className={cn(
+                        'border-b px-3 py-2 text-[10px]',
+                        detail.data.deployment.status === 'queued'
+                          ? 'border-zinc-800/60 bg-zinc-900/40 text-zinc-400'
+                          : 'border-red-900/30 bg-red-500/5 text-red-300',
+                      )}
+                    >
                       {detail.data.deployment.detail}
                     </div>
                   ) : null}

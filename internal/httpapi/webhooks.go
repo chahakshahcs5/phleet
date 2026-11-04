@@ -247,27 +247,45 @@ func (s *Server) deployAtRef(p model.Project, ref string) (int, error) {
 		if !projectDeployable(target) {
 			return total, fmt.Errorf("%s has no deployable source", target.Name)
 		}
-		if s.hasInflight(target.ID) {
+		if !s.releaseQueuedDeployments(target.ID) {
 			return total, fmt.Errorf("%s already has a deployment in progress", target.Name)
 		}
 		placements, err := s.ensurePlacements(target)
 		if err != nil {
 			return total, err
 		}
-		online := 0
+		if placementsStopped(placements) {
+			return total, fmt.Errorf("%s is stopped; start it before deploying", target.Name)
+		}
+		deployed := 0
 		for _, pl := range placements {
+			if pl.Desired == "stopped" {
+				continue
+			}
 			if !s.hub.Online(pl.ServerID) {
+				// Queue the push for when the phone reconnects.
+				if _, err := s.queueDeployment(target, pl, ref); err != nil {
+					return total, fmt.Errorf("%s: %w", target.Name, err)
+				}
+				deployed++
 				continue
 			}
 			if _, err := s.startDeployment(target, pl, ref); err != nil {
+				if !s.hub.Online(pl.ServerID) {
+					if _, qerr := s.queueDeployment(target, pl, ref); qerr != nil {
+						return total, fmt.Errorf("%s: %w", target.Name, qerr)
+					}
+					deployed++
+					continue
+				}
 				return total, fmt.Errorf("%s: %w", target.Name, err)
 			}
-			online++
+			deployed++
 		}
-		if online == 0 {
-			return total, fmt.Errorf("%s has no online replica", target.Name)
+		if deployed == 0 {
+			return total, fmt.Errorf("%s has no eligible replica", target.Name)
 		}
-		total += online
+		total += deployed
 	}
 	return total, nil
 }

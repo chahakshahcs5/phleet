@@ -196,6 +196,9 @@ long-lived connections on the old release get a 30-second drain. If the new rele
 keeps serving and the deployment is marked `rolled_back`. If the phone disappears mid-deploy, the control plane waits
 a short reconnect grace, then marks the deployment `failed` with `phone went offline during deployment` so CI does not
 wait for the stale-deploy sweep; a heartbeat after reconnect can still recover the row if the release actually finished.
+A deploy requested while the phone is already offline is queued with detail `waiting for the phone to come online` and
+sent on the next heartbeat; it expires after seven days, and a newer deploy supersedes it. Stopping a project or stack
+rejects new deploys and cancels queued ones, so a stopped app is never started behind the user's back.
 The first deploy after upgrading from an older agent briefly restarts the app once to move it behind the switchboard.
 A phone that reboots re-supervises its apps from `~/.phleet/apps.json`.
 
@@ -226,9 +229,10 @@ containers on a phone use Podroid + Compose. For a database inside a stack, crea
 stack pins every service to one phone, which is exactly what a loopback database needs.
 
 **Stack lifecycle includes its databases.** `Stop` stops the services and then the addons that belong to the stack;
-`Start` brings those addons up before the services. Deleting a stack shows a second warning listing the databases it
-owns, then deletes them and their data (a database also attached to another project is kept). Back up anything you
-need before confirming.
+`Start` brings those addons up before the services. A stopped stack rejects new deploys and cancels any deploy that was
+still waiting for the phone, so a later reconnection cannot start it unexpectedly. Deleting a stack shows a second
+warning listing the databases it owns, then deletes them and their data (a database also attached to another project is
+kept). Back up anything you need before confirming.
 
 ### Project kinds
 

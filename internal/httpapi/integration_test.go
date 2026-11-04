@@ -482,9 +482,19 @@ func TestProjectLifecycleAPI(t *testing.T) {
 		t.Fatalf("patch not applied: %+v", patched.Project)
 	}
 
-	// The phone is not connected, so a deploy must be refused.
-	if code := h.do(t, http.MethodPost, "/api/projects/"+created.Project.ID+"/deploy", nil, nil); code != 409 {
-		t.Fatalf("expected 409 deploy while offline, got %d", code)
+	// The phone is not connected, so the deploy is queued for reconnect.
+	if code := h.do(t, http.MethodPost, "/api/projects/"+created.Project.ID+"/deploy", nil, nil); code != 202 {
+		t.Fatalf("expected 202 queued deploy while offline, got %d", code)
+	}
+	var queued struct {
+		Deployments []model.Deployment `json:"deployments"`
+	}
+	if code := h.do(t, http.MethodGet, "/api/projects/"+created.Project.ID+"/deployments", nil, &queued); code != 200 {
+		t.Fatalf("deployments status %d", code)
+	}
+	if len(queued.Deployments) == 0 || queued.Deployments[0].Status != "queued" ||
+		queued.Deployments[0].Detail != "waiting for the phone to come online" {
+		t.Fatalf("offline deploy was not queued: %+v", queued.Deployments)
 	}
 
 	var list struct {
@@ -679,9 +689,9 @@ func TestWebhookAndDeployRefAPI(t *testing.T) {
 		"X-Hub-Signature-256": "sha256=" + hex.EncodeToString(mac.Sum(nil)),
 		"X-GitHub-Event":      "push",
 	}
-	// The phone is not connected, so the signature passes and deployment is
-	// rejected because there is no online replica.
-	if code := h.doWithHeaders(t, http.MethodPost, "/hooks/github/"+created.Project.ID, body, good, nil); code != 409 {
+	// The phone is not connected, so the signature passes and the deployment
+	// is queued until the phone reconnects.
+	if code := h.doWithHeaders(t, http.MethodPost, "/hooks/github/"+created.Project.ID, body, good, nil); code != 202 {
 		t.Fatalf("valid github webhook status %d", code)
 	}
 	// A different branch is ignored before any deployment is attempted.
@@ -711,7 +721,7 @@ func TestWebhookAndDeployRefAPI(t *testing.T) {
 	}
 	if code := h.do(t, http.MethodPost, "/api/projects/"+created.Project.ID+"/deploy", map[string]any{
 		"ref": "v1.2.3",
-	}, nil); code != 409 {
+	}, nil); code != 202 {
 		t.Fatalf("valid ref while offline status %d", code)
 	}
 	if code := h.do(t, http.MethodGet, "/api/projects/"+created.Project.ID+"/releases?serverId=phone-x", nil, nil); code != 409 {

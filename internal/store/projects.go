@@ -318,9 +318,9 @@ func (s *Store) CreateDeployment(d model.Deployment) error {
 		d.StartedAt = now()
 	}
 	_, err := s.db.Exec(`INSERT INTO deployments
-(id,project_id,server_id,commit_sha,status,release,started_at,finished_at,detail)
-VALUES (?,?,?,?,?,?,?,?,?)`,
-		d.ID, d.ProjectID, d.ServerID, d.CommitSHA, d.Status, d.Release, d.StartedAt, d.FinishedAt, d.Detail)
+(id,project_id,server_id,ref,commit_sha,status,release,started_at,finished_at,detail)
+VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		d.ID, d.ProjectID, d.ServerID, d.Ref, d.CommitSHA, d.Status, d.Release, d.StartedAt, d.FinishedAt, d.Detail)
 	return err
 }
 
@@ -342,9 +342,9 @@ func (s *Store) FinishDeployment(id, status, release, detail string) error {
 
 func (s *Store) GetDeployment(id string) (model.Deployment, error) {
 	var d model.Deployment
-	err := s.db.QueryRow(`SELECT id,project_id,server_id,commit_sha,status,release,started_at,finished_at,detail
+	err := s.db.QueryRow(`SELECT id,project_id,server_id,ref,commit_sha,status,release,started_at,finished_at,detail
 FROM deployments WHERE id=?`, id).
-		Scan(&d.ID, &d.ProjectID, &d.ServerID, &d.CommitSHA, &d.Status, &d.Release, &d.StartedAt, &d.FinishedAt, &d.Detail)
+		Scan(&d.ID, &d.ProjectID, &d.ServerID, &d.Ref, &d.CommitSHA, &d.Status, &d.Release, &d.StartedAt, &d.FinishedAt, &d.Detail)
 	if errors.Is(err, sql.ErrNoRows) {
 		return d, ErrNotFound
 	}
@@ -355,7 +355,7 @@ func (s *Store) ListDeployments(projectID string, limit int) ([]model.Deployment
 	if limit <= 0 || limit > 200 {
 		limit = 30
 	}
-	rows, err := s.db.Query(`SELECT id,project_id,server_id,commit_sha,status,release,started_at,finished_at,detail
+	rows, err := s.db.Query(`SELECT id,project_id,server_id,ref,commit_sha,status,release,started_at,finished_at,detail
 FROM deployments WHERE project_id=? ORDER BY started_at DESC LIMIT ?`, projectID, limit)
 	if err != nil {
 		return nil, err
@@ -364,7 +364,7 @@ FROM deployments WHERE project_id=? ORDER BY started_at DESC LIMIT ?`, projectID
 	out := []model.Deployment{}
 	for rows.Next() {
 		var d model.Deployment
-		if err := rows.Scan(&d.ID, &d.ProjectID, &d.ServerID, &d.CommitSHA, &d.Status, &d.Release,
+		if err := rows.Scan(&d.ID, &d.ProjectID, &d.ServerID, &d.Ref, &d.CommitSHA, &d.Status, &d.Release,
 			&d.StartedAt, &d.FinishedAt, &d.Detail); err != nil {
 			return nil, err
 		}
@@ -377,7 +377,7 @@ FROM deployments WHERE project_id=? ORDER BY started_at DESC LIMIT ?`, projectID
 // phone. Used when an agent disappears so CI/UI do not keep polling a deploy
 // that can no longer report progress.
 func (s *Store) ListInflightDeploymentsForServer(serverID string) ([]model.Deployment, error) {
-	rows, err := s.db.Query(`SELECT id,project_id,server_id,commit_sha,status,release,started_at,finished_at,detail
+	rows, err := s.db.Query(`SELECT id,project_id,server_id,ref,commit_sha,status,release,started_at,finished_at,detail
 FROM deployments WHERE server_id=? AND status NOT IN ('active','failed','rolled_back')
 ORDER BY started_at`, serverID)
 	if err != nil {
@@ -387,7 +387,35 @@ ORDER BY started_at`, serverID)
 	out := []model.Deployment{}
 	for rows.Next() {
 		var d model.Deployment
-		if err := rows.Scan(&d.ID, &d.ProjectID, &d.ServerID, &d.CommitSHA, &d.Status, &d.Release,
+		if err := rows.Scan(&d.ID, &d.ProjectID, &d.ServerID, &d.Ref, &d.CommitSHA, &d.Status, &d.Release,
+			&d.StartedAt, &d.FinishedAt, &d.Detail); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// ListQueuedDeployments returns deployments that have not been sent to an
+// agent. The HTTP layer filters out transient rows that are already being sent.
+func (s *Store) ListQueuedDeployments(serverID string) ([]model.Deployment, error) {
+	query := `SELECT id,project_id,server_id,ref,commit_sha,status,release,started_at,finished_at,detail
+FROM deployments WHERE status='queued'`
+	args := []any{}
+	if serverID != "" {
+		query += ` AND server_id=?`
+		args = append(args, serverID)
+	}
+	query += ` ORDER BY started_at`
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.Deployment{}
+	for rows.Next() {
+		var d model.Deployment
+		if err := rows.Scan(&d.ID, &d.ProjectID, &d.ServerID, &d.Ref, &d.CommitSHA, &d.Status, &d.Release,
 			&d.StartedAt, &d.FinishedAt, &d.Detail); err != nil {
 			return nil, err
 		}

@@ -131,6 +131,7 @@ type Deployment struct {
 	ID         string `json:"id"`
 	ProjectID  string `json:"projectId"`
 	ServerID   string `json:"serverId"`
+	Ref        string `json:"ref,omitempty"`
 	CommitSHA  string `json:"commitSha"`
 	Status     string `json:"status"`
 	Release    string `json:"release"`

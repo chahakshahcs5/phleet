@@ -69,6 +69,9 @@ func (s *Server) reconcileAll() {
 			s.reconcileAddon(a)
 		}
 	}
+	// Retry deployments that were queued while their phone was offline. This
+	// also covers a control-plane restart while the phone was already online.
+	s.dispatchQueuedDeployments("")
 	if s.bridges != nil {
 		s.bridges.syncAll()
 	}
@@ -84,6 +87,10 @@ func (s *Server) failInflightDeployments(serverID, detail string) {
 		return
 	}
 	for _, d := range list {
+		if deploymentAwaitingPhone(d) {
+			// Queued while the phone was already offline: keep waiting.
+			continue
+		}
 		_ = s.st.FinishDeployment(d.ID, "failed", d.Release, detail)
 		_ = s.st.UpdatePlacementStatusFor(d.ProjectID, serverID, "failed", 0, 0, detail, d.Release)
 		_ = s.st.AddEvent("agent", "deploy.offline", d.ProjectID, detail)
@@ -99,9 +106,26 @@ func (s *Server) expireStaleDeployments(p model.Project) {
 	if err != nil {
 		return
 	}
-	cutoff := time.Now().Add(-20 * time.Minute).Unix()
+	now := time.Now()
+	cutoff := now.Add(-20 * time.Minute).Unix()
+	queueCutoff := now.Add(-7 * 24 * time.Hour).Unix()
 	for _, d := range list {
-		if isTerminalDeploy(d.Status) || d.StartedAt > cutoff {
+		if isTerminalDeploy(d.Status) {
+			continue
+		}
+		if deploymentAwaitingPhone(d) {
+			// A request may wait days for a phone. Expire it eventually so a
+			// long-forgotten CI run does not deploy unexpectedly.
+			if d.StartedAt > queueCutoff {
+				continue
+			}
+			detail := "deployment request expired while waiting for the phone"
+			_ = s.st.FinishDeployment(d.ID, "failed", d.Release, detail)
+			_ = s.st.UpdatePlacementStatusFor(p.ID, d.ServerID, "pending", 0, 0, detail, d.Release)
+			_ = s.st.AddEvent("scheduler", "deploy.expired", p.ID, d.ID)
+			continue
+		}
+		if d.StartedAt > cutoff {
 			continue
 		}
 		_ = s.st.FinishDeployment(d.ID, "failed", d.Release, "deployment timed out")

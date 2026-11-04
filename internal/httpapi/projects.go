@@ -61,7 +61,30 @@ type projectView struct {
 	GitAuth    bool              `json:"gitAuth"`
 }
 
-const deployOfflineDetail = "phone went offline during deployment"
+const (
+	deployOfflineDetail = "phone went offline during deployment"
+	// deployWaitingDetail marks a queued deployment that has never been sent to
+	// a phone. The row is the queue: when the phone reconnects the reconciler
+	// sends it and clears the marker.
+	deployWaitingDetail = "waiting for the phone to come online"
+)
+
+func deploymentAwaitingPhone(d model.Deployment) bool {
+	return d.Status == "queued" && d.Detail == deployWaitingDetail
+}
+
+// placementsStopped reports whether every replica was explicitly stopped.
+func placementsStopped(placements []model.Placement) bool {
+	if len(placements) == 0 {
+		return false
+	}
+	for _, pl := range placements {
+		if pl.Desired != "stopped" {
+			return false
+		}
+	}
+	return true
+}
 
 func isTerminalDeploy(s string) bool {
 	switch s {
@@ -542,6 +565,51 @@ func (s *Server) hasInflight(projectID string) bool {
 	return false
 }
 
+// releaseQueuedDeployments supersedes deployments that were still waiting for a
+// phone when a new request arrives, so the latest commit wins and old CI runs
+// fail fast. It reports false when a real deployment is in flight.
+func (s *Server) releaseQueuedDeployments(projectID string) bool {
+	list, err := s.st.ListDeployments(projectID, 20)
+	if err != nil {
+		return false
+	}
+	for _, d := range list {
+		if !isTerminalDeploy(d.Status) && !deploymentAwaitingPhone(d) {
+			return false
+		}
+	}
+	cancelled := 0
+	for _, d := range list {
+		if !deploymentAwaitingPhone(d) {
+			continue
+		}
+		_ = s.st.FinishDeployment(d.ID, "failed", d.Release, "superseded by a newer deployment request")
+		_ = s.st.AddEvent("scheduler", "deploy.superseded", projectID, d.ID)
+		cancelled++
+	}
+	if cancelled > 0 {
+		s.log.Info("superseded queued deployments", "project", projectID, "count", cancelled)
+	}
+	return true
+}
+
+// cancelWaitingDeployments closes queued deployments when the project is
+// stopped. They must not start later behind the user's back.
+func (s *Server) cancelWaitingDeployments(projectID, detail string) {
+	list, err := s.st.ListDeployments(projectID, 200)
+	if err != nil {
+		return
+	}
+	for _, d := range list {
+		if !deploymentAwaitingPhone(d) {
+			continue
+		}
+		_ = s.st.FinishDeployment(d.ID, "failed", d.Release, detail)
+		_ = s.st.UpdatePlacementStatusFor(projectID, d.ServerID, "stopped", 0, 0, detail, d.Release)
+		_ = s.st.AddEvent("ui", "deploy.cancelled", projectID, detail)
+	}
+}
+
 func (s *Server) deployGitAuth(p model.Project) (agentproto.GitAuth, error) {
 	if p.GitAuthEnc == "" || p.GitAuthType == "" {
 		return agentproto.GitAuth{}, nil
@@ -555,19 +623,10 @@ func (s *Server) deployGitAuth(p model.Project) (agentproto.GitAuth, error) {
 	}, nil
 }
 
-// startDeployment creates a deployment row and sends the plan to one phone.
-func (s *Server) startDeployment(p model.Project, pl model.Placement, ref string) (model.Deployment, error) {
-	if !s.hub.Online(pl.ServerID) {
-		return model.Deployment{}, errors.New("phone is offline")
-	}
-	if m, err := s.st.LatestMetrics(pl.ServerID); err == nil {
-		if m.TempC >= 70 {
-			return model.Deployment{}, fmt.Errorf("phone is at %.0f°C; let it cool before deploying", m.TempC)
-		}
-		if m.BatteryPct >= 0 && m.BatteryPct < 10 && !m.Charging {
-			return model.Deployment{}, errors.New("phone battery is below 10% and not charging")
-		}
-	}
+// buildDeployRequest validates a project and prepares the plan sent to one
+// phone. It is shared by immediate deploys and deployments queued while the
+// phone was offline.
+func (s *Server) buildDeployRequest(p model.Project, pl model.Placement, ref, deploymentID string) (agentproto.DeployRequest, error) {
 	sourceID := p.ID
 	sourceType := p.SourceType
 	repo := p.Repo
@@ -587,30 +646,30 @@ func (s *Server) startDeployment(p model.Project, pl model.Placement, ref string
 	sourcePath := ""
 	if sourceType == "upload" {
 		if !s.hasSourceBundle(sourceID) {
-			return model.Deployment{}, errors.New("upload a source folder before deploying")
+			return agentproto.DeployRequest{}, errors.New("upload a source folder before deploying")
 		}
 		sourcePath = "/api/projects/" + sourceID + "/source"
 	} else if strings.TrimSpace(repo) == "" {
-		return model.Deployment{}, errors.New("repository is not set")
+		return agentproto.DeployRequest{}, errors.New("repository is not set")
 	}
 	gitAuth := agentproto.GitAuth{}
 	if sourceType == "git" {
 		var err error
 		gitAuth, err = s.deployGitAuth(authProject)
 		if err != nil {
-			return model.Deployment{}, err
+			return agentproto.DeployRequest{}, err
 		}
 	}
 	if p.Kind != "static" && strings.TrimSpace(p.StartCmd) == "" {
-		return model.Deployment{}, errors.New("start command is not set")
+		return agentproto.DeployRequest{}, errors.New("start command is not set")
 	}
 	env, err := s.decryptEnv(p)
 	if err != nil {
-		return model.Deployment{}, fmt.Errorf("cannot decrypt environment: %w", err)
+		return agentproto.DeployRequest{}, fmt.Errorf("cannot decrypt environment: %w", err)
 	}
 	secretFiles, err := s.projectSecrets(p.ID)
 	if err != nil {
-		return model.Deployment{}, fmt.Errorf("cannot decrypt secret files: %w", err)
+		return agentproto.DeployRequest{}, fmt.Errorf("cannot decrypt secret files: %w", err)
 	}
 	if p.ParentID != "" {
 		// Shared stack env is inherited; per-service values win.
@@ -641,21 +700,10 @@ func (s *Server) startDeployment(p model.Project, pl model.Placement, ref string
 		}
 	}
 	if err := s.injectAddonEnv(p, pl.ServerID, env); err != nil {
-		return model.Deployment{}, err
+		return agentproto.DeployRequest{}, err
 	}
-	dep := model.Deployment{
-		ID:        uuid.NewString(),
-		ProjectID: p.ID,
-		ServerID:  pl.ServerID,
-		Status:    "queued",
-		StartedAt: time.Now().Unix(),
-	}
-	if err := s.st.CreateDeployment(dep); err != nil {
-		return dep, err
-	}
-	_ = s.st.UpdatePlacementStatusFor(p.ID, pl.ServerID, "deploying", pl.PID, pl.Restarts, "", pl.Release)
 	req := agentproto.DeployRequest{
-		DeploymentID: dep.ID, ProjectID: p.ID, Slug: p.Slug, Name: p.Name,
+		DeploymentID: deploymentID, ProjectID: p.ID, Slug: p.Slug, Name: p.Name,
 		Kind: p.Kind, Ref: ref, Repo: repo, Branch: p.Branch, BuildCmd: p.BuildCmd, StartCmd: p.StartCmd,
 		StaticDir: p.StaticDir, HealthPath: p.HealthPath, Port: pl.Port, SourcePath: sourcePath,
 		GitAuth: gitAuth, Env: env, Secrets: secretFiles, KeepReleases: 5, RestartPolicy: "always",
@@ -664,12 +712,168 @@ func (s *Server) startDeployment(p model.Project, pl model.Placement, ref string
 		// A worker has no listener; an HTTP health path would always fail.
 		req.HealthPath = ""
 	}
+	return req, nil
+}
+
+// phoneCanDeploy refuses builds that would overheat or drain the phone.
+func (s *Server) phoneCanDeploy(serverID string) error {
+	m, err := s.st.LatestMetrics(serverID)
+	if err != nil {
+		return nil
+	}
+	if m.TempC >= 70 {
+		return fmt.Errorf("phone is at %.0f°C; let it cool before deploying", m.TempC)
+	}
+	if m.BatteryPct >= 0 && m.BatteryPct < 10 && !m.Charging {
+		return errors.New("phone battery is below 10% and not charging")
+	}
+	return nil
+}
+
+// startDeployment creates a deployment row and sends the plan to one phone.
+func (s *Server) startDeployment(p model.Project, pl model.Placement, ref string) (model.Deployment, error) {
+	if !s.hub.Online(pl.ServerID) {
+		return model.Deployment{}, errors.New("phone is offline")
+	}
+	if err := s.phoneCanDeploy(pl.ServerID); err != nil {
+		return model.Deployment{}, err
+	}
+	dep := model.Deployment{
+		ID:        uuid.NewString(),
+		ProjectID: p.ID,
+		ServerID:  pl.ServerID,
+		Ref:       ref,
+		Status:    "queued",
+		StartedAt: time.Now().Unix(),
+	}
+	req, err := s.buildDeployRequest(p, pl, ref, dep.ID)
+	if err != nil {
+		return model.Deployment{}, err
+	}
+	if err := s.st.CreateDeployment(dep); err != nil {
+		return dep, err
+	}
+	return dep, s.sendDeployment(p, pl, dep, req)
+}
+
+// queueDeployment stores a deployment that is sent when the phone reconnects.
+// The build plan is validated now, so configuration errors still fail CI
+// instead of surfacing hours later.
+func (s *Server) queueDeployment(p model.Project, pl model.Placement, ref string) (model.Deployment, error) {
+	dep := model.Deployment{
+		ID:        uuid.NewString(),
+		ProjectID: p.ID,
+		ServerID:  pl.ServerID,
+		Ref:       ref,
+		Status:    "queued",
+		Detail:    deployWaitingDetail,
+		StartedAt: time.Now().Unix(),
+	}
+	if _, err := s.buildDeployRequest(p, pl, ref, dep.ID); err != nil {
+		return model.Deployment{}, err
+	}
+	if err := s.st.CreateDeployment(dep); err != nil {
+		return model.Deployment{}, err
+	}
+	_ = s.st.UpdatePlacementStatusFor(p.ID, pl.ServerID, "pending", pl.PID, pl.Restarts, deployWaitingDetail, pl.Release)
+	_ = s.st.AddEvent("scheduler", "deploy.queued", p.ID, "waiting for "+pl.ServerID)
+	return dep, nil
+}
+
+// sendDeployment marks the placement as deploying and hands the plan to the
+// agent. A send failure closes the row so CI does not poll forever.
+func (s *Server) sendDeployment(p model.Project, pl model.Placement, dep model.Deployment, req agentproto.DeployRequest) error {
+	_ = s.st.UpdatePlacementStatusFor(p.ID, pl.ServerID, "deploying", pl.PID, pl.Restarts, "", pl.Release)
 	if err := s.hub.Send(pl.ServerID, agentproto.TypeDeployRequest, req); err != nil {
 		_ = s.st.FinishDeployment(dep.ID, "failed", "", err.Error())
 		_ = s.st.UpdatePlacementStatusFor(p.ID, pl.ServerID, "failed", 0, 0, err.Error(), "")
-		return dep, err
+		return err
 	}
-	return dep, nil
+	return nil
+}
+
+// dispatchQueuedDeployments sends deployments that were waiting for a phone.
+// serverID limits the scan to a reconnecting phone; an empty value scans all.
+func (s *Server) dispatchQueuedDeployments(serverID string) {
+	list, err := s.st.ListQueuedDeployments(serverID)
+	if err != nil {
+		s.log.Warn("list queued deployments", "err", err)
+		return
+	}
+	for _, dep := range list {
+		if deploymentAwaitingPhone(dep) {
+			s.dispatchQueuedDeployment(dep)
+		}
+	}
+}
+
+func (s *Server) dispatchQueuedDeployment(dep model.Deployment) {
+	s.deployMu.Lock()
+	defer s.deployMu.Unlock()
+
+	// Re-read under the deploy lock: another heartbeat or the reconciler may
+	// have sent or cancelled this row already.
+	current, err := s.st.GetDeployment(dep.ID)
+	if err != nil || !deploymentAwaitingPhone(current) {
+		return
+	}
+	if !s.hub.Online(current.ServerID) {
+		return
+	}
+	p, err := s.st.GetProject(current.ProjectID)
+	if err != nil {
+		_ = s.st.FinishDeployment(current.ID, "failed", "", "project no longer exists")
+		return
+	}
+	placements, err := s.st.ListProjectPlacements(p.ID)
+	if err != nil {
+		return
+	}
+	var pl *model.Placement
+	for i := range placements {
+		if placements[i].ServerID == current.ServerID {
+			pl = &placements[i]
+			break
+		}
+	}
+	if pl == nil {
+		_ = s.st.FinishDeployment(current.ID, "failed", "", "placement was removed before the phone came online")
+		_ = s.st.AddEvent("scheduler", "deploy.cancelled", p.ID, current.ID)
+		return
+	}
+	if pl.Desired == "stopped" {
+		_ = s.st.FinishDeployment(current.ID, "failed", "", "project was stopped before the phone came online")
+		_ = s.st.AddEvent("scheduler", "deploy.cancelled", p.ID, current.ID)
+		return
+	}
+	if err := s.phoneCanDeploy(current.ServerID); err != nil {
+		// Keep it queued; the next heartbeat or reconcile tick retries.
+		s.log.Debug("queued deploy deferred", "project", p.Slug, "server", current.ServerID, "reason", err)
+		return
+	}
+	req, err := s.buildDeployRequest(p, *pl, current.Ref, current.ID)
+	if err != nil {
+		_ = s.st.FinishDeployment(current.ID, "failed", "", err.Error())
+		_ = s.st.UpdatePlacementStatusFor(p.ID, pl.ServerID, "failed", 0, 0, err.Error(), "")
+		_ = s.st.AddEvent("scheduler", "deploy.failed", p.ID, err.Error())
+		return
+	}
+	// Clear the waiting marker before sending: a fast agent status event must
+	// not be overwritten, and offline cleanup should now treat the row as
+	// in-flight.
+	_ = s.st.UpdateDeploymentStatus(current.ID, "queued", "", "")
+	if err := s.sendDeployment(p, *pl, current, req); err != nil {
+		if !s.hub.Online(current.ServerID) {
+			// The phone dropped between the check and the send. Put it back in
+			// the queue instead of failing a deploy it never received.
+			_ = s.st.UpdateDeploymentStatus(current.ID, "queued", "", deployWaitingDetail)
+			_ = s.st.UpdatePlacementStatusFor(p.ID, pl.ServerID, "pending", pl.PID, pl.Restarts, deployWaitingDetail, pl.Release)
+			return
+		}
+		s.log.Warn("dispatch queued deployment", "project", p.Slug, "server", current.ServerID, "err", err)
+		return
+	}
+	_ = s.st.AddEvent("scheduler", "deploy.resumed", p.ID, "phone came back online")
 }
 
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
@@ -1537,13 +1741,19 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if s.hasInflight(p.ID) {
-		apiErr(w, 409, errors.New("a deployment is already in progress"))
-		return
-	}
 	placements, err := s.ensurePlacements(p)
 	if err != nil {
 		apiErr(w, 409, err)
+		return
+	}
+	// A new request supersedes one still waiting for a phone; a real in-flight
+	// deployment blocks it.
+	if !s.releaseQueuedDeployments(p.ID) {
+		apiErr(w, 409, errors.New("a deployment is already in progress"))
+		return
+	}
+	if placementsStopped(placements) {
+		apiErr(w, 409, errors.New("project is stopped; start it before deploying"))
 		return
 	}
 	if len(placements) == 0 {
@@ -1556,6 +1766,9 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	blocked := []string{}
 	deployable := make([]model.Placement, 0, len(placements))
 	for _, pl := range placements {
+		if pl.Desired == "stopped" {
+			continue
+		}
 		srv, err := s.st.GetServer(pl.ServerID)
 		if err == nil && !serverHasUserland(srv) {
 			blocked = append(blocked, serverLabel(srv))
@@ -1577,7 +1790,15 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		dep, err := s.startDeployment(p, pl, ref)
 		if err != nil {
 			if !s.hub.Online(pl.ServerID) {
-				skipped = append(skipped, pl.ServerID)
+				// The phone is offline: keep the request and send it when the
+				// phone reconnects instead of failing CI.
+				queued, qerr := s.queueDeployment(p, pl, ref)
+				if qerr == nil {
+					results = append(results, result{ID: queued.ID, ServerID: pl.ServerID, Port: pl.Port, Status: queued.Status})
+				} else {
+					_ = s.st.AddEvent("scheduler", "deploy.queue_failed", p.ID, qerr.Error())
+					skipped = append(skipped, pl.ServerID)
+				}
 				continue
 			}
 			results = append(results, result{ServerID: pl.ServerID, Status: "failed"})
@@ -1604,10 +1825,22 @@ func (s *Server) handleDeployStack(w http.ResponseWriter, p model.Project, ref s
 		return
 	}
 	for _, child := range children {
-		if s.hasInflight(child.ID) {
+		if !s.releaseQueuedDeployments(child.ID) {
 			apiErr(w, 409, fmt.Errorf("%s is already deploying", child.Name))
 			return
 		}
+	}
+	stopped := []string{}
+	for _, child := range children {
+		pls, err := s.st.ListProjectPlacements(child.ID)
+		if err == nil && placementsStopped(pls) {
+			stopped = append(stopped, child.Name)
+		}
+	}
+	if len(stopped) > 0 {
+		apiErr(w, 409, fmt.Errorf("stopped service(s): %s; start the stack before deploying",
+			strings.Join(stopped, ", ")))
+		return
 	}
 	results := make([]deployResult, 0, len(children))
 	skipped := []string{}
@@ -1622,10 +1855,19 @@ func (s *Server) handleDeployStack(w http.ResponseWriter, p model.Project, ref s
 			continue
 		}
 		for _, pl := range placements {
+			if pl.Desired == "stopped" {
+				continue
+			}
 			dep, err := s.startDeployment(child, pl, ref)
 			if err != nil {
 				if !s.hub.Online(pl.ServerID) {
-					skipped = append(skipped, pl.ServerID)
+					queued, qerr := s.queueDeployment(child, pl, ref)
+					if qerr == nil {
+						results = append(results, deployResult{ID: queued.ID, ServerID: pl.ServerID, Port: pl.Port, Status: queued.Status})
+					} else {
+						_ = s.st.AddEvent("scheduler", "deploy.queue_failed", child.ID, qerr.Error())
+						skipped = append(skipped, pl.ServerID)
+					}
 					continue
 				}
 				results = append(results, deployResult{ServerID: pl.ServerID, Status: "failed"})
@@ -1648,6 +1890,12 @@ func (s *Server) handleProjectAction(action string) http.HandlerFunc {
 		if err != nil {
 			apiErr(w, 404, err)
 			return
+		}
+		if action == "stop" {
+			// Serialize stop with deploy triggers: a deploy must not slip in
+			// between setting desired=stopped and cancelling the queued rows.
+			s.deployMu.Lock()
+			defer s.deployMu.Unlock()
 		}
 		if p.Kind == "stack" {
 			children, err := s.st.ListChildProjects(p.ID)
@@ -1718,6 +1966,10 @@ func (s *Server) runProjectAction(ctx context.Context, p model.Project, action s
 	}
 	if err := s.st.SetProjectDesired(p.ID, desired); err != nil {
 		return []map[string]any{{"serverId": p.PinnedServer, "ok": false, "error": err.Error()}}, 0
+	}
+	if action == "stop" {
+		// A pending deploy must not start the app after the user stopped it.
+		s.cancelWaitingDeployments(p.ID, "project was stopped before the phone came online")
 	}
 	results := []map[string]any{}
 	okCount := 0

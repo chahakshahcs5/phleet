@@ -166,6 +166,8 @@ export default function StackDetail() {
 
   const project = query.data.project
   const services = project.services ?? []
+  const status = aggregateStatus(project)
+  const stopped = status === 'stopped'
   const busy = deploy.isPending || action.isPending || remove.isPending
   const primary = services[0]
   const mutError = deploy.error || action.error || (addonWarning ? undefined : remove.error)
@@ -209,7 +211,7 @@ export default function StackDetail() {
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
-          <Button size="sm" variant="primary" disabled={busy} onClick={() => deploy.mutate()}>
+          <Button size="sm" variant="primary" disabled={busy || stopped} onClick={() => deploy.mutate()}>
             {deploy.isPending ? <Spinner className="h-3 w-3 border-zinc-900/40 border-t-zinc-900" /> : <Play size={12} />}
             Deploy stack
           </Button>
@@ -227,6 +229,12 @@ export default function StackDetail() {
           </Button>
         </div>
       </div>
+
+      {stopped ? (
+        <div className="mt-3 rounded-lg border border-amber-900/40 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-300">
+          This stack is stopped. Restart it before deploying; CI deploys are rejected while it stays stopped.
+        </div>
+      ) : null}
 
       {mutError ? (
         <div className="mt-3 rounded-lg border border-red-900/40 bg-red-500/5 px-3 py-2 text-[11px] text-red-300">

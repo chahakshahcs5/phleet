@@ -50,18 +50,36 @@ Each entry has `id`, `status` (`queued`, `building`, `starting`, `health_check`,
 one you started: a stack returns several rows, and another deploy or webhook can
 add rows while you poll. Fail the job if any tracked deployment reaches
 `failed` or `rolled_back`, and succeed only when all of them are `active`.
-Also fail when the trigger response has a non-empty `skipped` list — that means
-a phone was offline and did not accept the deploy.
+Also fail when the trigger response has a non-empty `skipped` list: those
+replicas could not even be queued (for example a database error).
 
 `GET /api/deployments/{id}` returns build logs and therefore needs an **admin**
 token; use the project history endpoint above with a `deployer` token.
 
-If the phone disconnects during a deployment, the control plane marks the
-deployment `failed` with `phone went offline during deployment` after a short
-reconnect grace. A CI job polling for a terminal state exits non-zero instead of
-waiting for the 20-minute stale-deploy sweep. If the phone reconnects and the
-release did in fact finish, the heartbeat can recover the row to `active` or
-`rolled_back`; inspect the deployment before retrying blindly.
+### Phone offline at trigger time
+
+If a replica's phone is offline when the deploy is triggered, phleet records a
+`queued` deployment with detail `waiting for the phone to come online` and
+returns `202` instead of `409`. The request stays on the control plane and is
+sent when the phone reconnects, so a CI job can keep polling as usual. Queued
+requests expire after seven days. A newer deploy (or webhook push) supersedes an
+older queued one; the older CI run then fails with
+`superseded by a newer deployment request`, so the latest commit wins.
+
+Queuing needs a target: a pinned phone or an existing placement. A project that
+has never been scheduled and is not pinned still returns `409` when no phone is
+online, because there is no device to wake up.
+
+If the project or stack is **stopped**, the trigger returns `409` and nothing is
+queued. Start it first; stopping a project or stack also cancels any deployment
+already waiting for a phone.
+
+If the phone disconnects mid-deployment, the control plane marks the deployment
+`failed` with `phone went offline during deployment` after a short reconnect
+grace. A CI job polling for a terminal state exits non-zero instead of waiting
+for the 20-minute stale-deploy sweep. If the phone reconnects and the release did
+in fact finish, the heartbeat can recover the row to `active` or `rolled_back`;
+inspect the deployment before retrying blindly.
 
 ## Deploy a commit, tag or branch
 
@@ -141,7 +159,10 @@ jobs:
 To wait for the result, capture the `deployments[].id` values from the trigger
 response and poll `/api/projects/$PHLEET_PROJECT_ID/deployments` until every one
 of them is `active` (fail on `failed` or `rolled_back`). The ready-to-copy
-example above already does this, including stacks with several services.
+example above already does this, including stacks with several services. If a
+phone is offline the example keeps polling until its timeout; the queued
+deployment still runs when the phone returns, even if the CI job has already
+given up.
 
 ## GitLab CI
 
