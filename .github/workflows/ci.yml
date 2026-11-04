@@ -43,10 +43,28 @@ jobs:
       - name: Test (race)
         run: go test -race ./...
 
+      - name: Vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: Audit web dependencies
+        working-directory: web
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Build binaries
         run: |
           go build -trimpath -o /tmp/phleetd ./cmd/phleetd
           go build -trimpath -o /tmp/phleet ./cmd/phleet
+
+      - name: Build agents
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 GOTOOLCHAIN=go1.22.12 \
+            GOFLAGS="-modfile=$PWD/go122.mod" \
+            go build -trimpath -ldflags "-s -w" -o /tmp/phleet-agent-linux-arm64 ./cmd/phleet-agent
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 GOTOOLCHAIN=go1.22.12 \
+            GOFLAGS="-modfile=$PWD/go122.mod" \
+            go build -trimpath -ldflags "-s -w" -o /tmp/phleet-agent-linux-arm ./cmd/phleet-agent
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags "-s -w" -o /tmp/phleet-agent-linux-amd64 ./cmd/phleet-agent
 
   windows:
     runs-on: windows-latest

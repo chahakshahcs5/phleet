@@ -228,6 +228,7 @@ func publishAssets(cfg *config.Config, log *slog.Logger) {
 
 	for _, agentName := range []string{
 		"phleet-agent-linux-arm64",
+		"phleet-agent-linux-arm",
 		"phleet-agent-linux-amd64",
 	} {
 		agentTarget := filepath.Join(cfg.BinDir(), agentName)

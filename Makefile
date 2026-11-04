@@ -2,7 +2,12 @@
 # On Windows use scripts/build.ps1 instead.
 
 BIN := dist
-VERSION := 0.10.1
+VERSION := 0.16.0
+
+# Go 1.23+ probes pidfd_open when starting a process, which Android 10's
+# seccomp policy kills with SIGSYS. Keep the arm agents on Go 1.22, matching
+# scripts/build.ps1.
+GO122 := GOTOOLCHAIN=go1.22.12 GOFLAGS="-modfile=$(CURDIR)/go122.mod"
 
 .PHONY: all web build cli agent test clean
 
@@ -20,7 +25,8 @@ cli:
 
 agent:
 	mkdir -p $(BIN)/bin
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o $(BIN)/bin/phleet-agent-linux-arm64 ./cmd/phleet-agent
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO122) go build -trimpath -ldflags "-s -w" -o $(BIN)/bin/phleet-agent-linux-arm64 ./cmd/phleet-agent
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 $(GO122) go build -trimpath -ldflags "-s -w" -o $(BIN)/bin/phleet-agent-linux-arm ./cmd/phleet-agent
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o $(BIN)/bin/phleet-agent-linux-amd64 ./cmd/phleet-agent
 	cp scripts/bootstrap-termux.sh $(BIN)/bin/bootstrap.sh
 	cp scripts/bootstrap-android-root.sh $(BIN)/bin/bootstrap-root.sh
