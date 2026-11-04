@@ -454,7 +454,12 @@ func rotateTokenFile(path string) (string, error) {
 		return "", err
 	}
 	tok := hex.EncodeToString(buf)
-	if err := os.WriteFile(path, []byte(tok+"\n"), 0o600); err != nil {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(tok+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
 		return "", err
 	}
 	return tok, nil
