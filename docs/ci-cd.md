@@ -25,8 +25,18 @@ curl -fsS -X POST \
   -H "Authorization: Bearer $PHLEET_TOKEN"
 ```
 
-The response is `202` with one deployment per eligible replica. Deployment
-progress is asynchronous. Poll:
+The response is `202` with one deployment per eligible replica (a stack returns
+one per service replica):
+
+```json
+{
+  "deployments": [{ "id": "...", "serverId": "...", "port": 4100, "status": "queued" }],
+  "skipped": []
+}
+```
+
+Capture every `deployments[].id` and poll the project's deployment history, then
+look the tracked IDs up in it:
 
 ```bash
 curl -fsS \
@@ -34,9 +44,17 @@ curl -fsS \
   "$PHLEET_URL/api/projects/$PHLEET_PROJECT_ID/deployments"
 ```
 
-The latest deployment includes `status` (`queued`, `building`, `starting`,
-`health_check`, `active`, `rolled_back`, `failed`), `startedAt`, `finishedAt`,
-`release` and `commitSha` for git sources.
+Each entry has `id`, `status` (`queued`, `building`, `starting`, `health_check`,
+`active`, `rolled_back`, `failed`), `detail`, `startedAt`, `finishedAt`,
+`release` and `commitSha` for git sources. Do not assume the newest row is the
+one you started: a stack returns several rows, and another deploy or webhook can
+add rows while you poll. Fail the job if any tracked deployment reaches
+`failed` or `rolled_back`, and succeed only when all of them are `active`.
+Also fail when the trigger response has a non-empty `skipped` list — that means
+a phone was offline and did not accept the deploy.
+
+`GET /api/deployments/{id}` returns build logs and therefore needs an **admin**
+token; use the project history endpoint above with a `deployer` token.
 
 If the phone disconnects during a deployment, the control plane marks the
 deployment `failed` with `phone went offline during deployment` after a short
@@ -95,7 +113,7 @@ Store `PHLEET_URL` and `PHLEET_TOKEN` as repository secrets, and
 `PHLEET_PROJECT_ID` as a repository variable. The manual dispatch form also
 accepts a project ID.
 
-The equivalent inline workflow is:
+A minimal inline workflow that only triggers a deploy:
 
 ```yaml
 name: Deploy
@@ -112,7 +130,7 @@ jobs:
       - name: Trigger phleet deploy
         env:
           PHLEET_URL: ${{ secrets.PHLEET_URL }}
-          PHLEET_PROJECT_ID: ${{ secrets.PHLEET_PROJECT_ID }}
+          PHLEET_PROJECT_ID: ${{ vars.PHLEET_PROJECT_ID }}
           PHLEET_TOKEN: ${{ secrets.PHLEET_TOKEN }}
         run: |
           curl -fsS -X POST \
@@ -120,8 +138,10 @@ jobs:
             -H "Authorization: Bearer $PHLEET_TOKEN"
 ```
 
-To wait for the result, poll the deployments endpoint until the newest
-deployment reaches `active`, `rolled_back` or `failed`.
+To wait for the result, capture the `deployments[].id` values from the trigger
+response and poll `/api/projects/$PHLEET_PROJECT_ID/deployments` until every one
+of them is `active` (fail on `failed` or `rolled_back`). The ready-to-copy
+example above already does this, including stacks with several services.
 
 ## GitLab CI
 
