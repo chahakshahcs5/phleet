@@ -17,6 +17,12 @@ import (
 	"phleet/internal/model"
 )
 
+// Agent replies share the control WebSocket. File reads are JSON/base64 and
+// can legitimately reach maxEditBytes (8 MiB) before encoding, so the read
+// limit must be comfortably larger than 256 KiB. Keep the small hello limit
+// below until the agent has proved its token.
+const maxAgentReplyBytes = 16 << 20
+
 func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 	// The header may contain the shared enrollment token or a per-device
 	// token. We cannot know which until the hello supplies the server ID, so
@@ -85,6 +91,9 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("agent connected", "id", hb.ID, "name", hb.Name, "host", hb.Hostname, "arch", hb.Arch)
 
+	// The agent has authenticated. Allow normal-sized replies (file reads,
+	// directory listings, task logs) without closing the connection.
+	ws.SetReadLimit(maxAgentReplyBytes)
 	conn := hub.NewConn(hb.ID, ws)
 	s.hub.Serve(conn, hb)
 	s.log.Info("agent disconnected", "id", hb.ID)

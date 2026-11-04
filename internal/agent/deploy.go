@@ -500,7 +500,9 @@ func (a *Agent) runCommand(ctx context.Context, dir, name string, args []string,
 	cmd := exec.CommandContext(ctx, name, args...)
 	prepareCommandGroup(cmd)
 	cmd.Dir = dir
-	cmd.Env = sanitizeEnv(env)
+	// Callers append cache/override variables to appEnv; collapse duplicates
+	// so the last value wins instead of relying on the child's env lookup.
+	cmd.Env = envFromMap(envToMap(sanitizeEnv(env)))
 	pr, pw := io.Pipe()
 	cmd.Stdout = pw
 	cmd.Stderr = pw

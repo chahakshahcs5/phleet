@@ -63,14 +63,51 @@ func TestWriteSecrets(t *testing.T) {
 }
 
 func TestAppEnvWorkerHasNoPort(t *testing.T) {
+	t.Setenv("PORT", "9999")
+	t.Setenv("HOST", "0.0.0.0")
 	env := appEnv(AppSpec{Slug: "jobs", Kind: "worker", DataDir: "/home/phleet/apps/jobs/shared/data"})
 	if _, ok := appEnvValue(env, "PORT"); ok {
 		t.Fatal("a worker must not receive PORT")
+	}
+	if _, ok := appEnvValue(env, "HOST"); ok {
+		t.Fatal("a worker must not inherit HOST")
 	}
 	if got, _ := appEnvValue(env, "PHLEET_WORKER"); got != "1" {
 		t.Fatalf("PHLEET_WORKER = %q, want 1", got)
 	}
 	if got, _ := appEnvValue(env, "PHLEET_DATA_DIR"); got == "" {
 		t.Fatal("a worker still gets a persistent data dir")
+	}
+}
+
+func TestAppEnvProjectOverridesBuiltins(t *testing.T) {
+	env := appEnv(AppSpec{
+		Slug: "demo", Port: 4100,
+		Env: map[string]string{"HOST": "0.0.0.0", "PORT": "9999", "NODE_ENV": "test"},
+	})
+	if got, _ := appEnvValue(env, "HOST"); got != "0.0.0.0" {
+		t.Fatalf("HOST = %q, want project override", got)
+	}
+	if got, _ := appEnvValue(env, "PORT"); got != "9999" {
+		t.Fatalf("PORT = %q, want project override", got)
+	}
+	if got, _ := appEnvValue(env, "NODE_ENV"); got != "test" {
+		t.Fatalf("NODE_ENV = %q, want project override", got)
+	}
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "HOST=") && kv != "HOST=0.0.0.0" {
+			t.Fatalf("duplicate HOST entry: %q", kv)
+		}
+	}
+}
+
+func TestAddonEnvDropsAppContract(t *testing.T) {
+	t.Setenv("HOST", "0.0.0.0")
+	t.Setenv("PORT", "9999")
+	env := appEnv(AppSpec{Slug: "db", Addon: true, Kind: "database"})
+	for _, name := range []string{"HOST", "PORT", "NODE_ENV", "PHLEET_APP", "PHLEET_PORT"} {
+		if _, ok := appEnvValue(env, name); ok {
+			t.Fatalf("addon inherited %s", name)
+		}
 	}
 }

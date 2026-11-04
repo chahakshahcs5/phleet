@@ -306,26 +306,19 @@ func (a *Agent) taskLogPath(spec agentproto.TaskSpec) string {
 }
 
 func (a *Agent) taskEnv(spec agentproto.TaskSpec) []string {
-	env := sanitizeEnv(os.Environ())
-	env = append(env, "PHLEET_TASK_ID="+spec.ID, "PHLEET_TASK_NAME="+spec.Name)
+	m := envToMap(sanitizeEnv(os.Environ()))
+	m["PHLEET_TASK_ID"] = spec.ID
+	m["PHLEET_TASK_NAME"] = spec.Name
 	if spec.Project {
 		dataDir := filepath.Join(a.appBase(spec.Slug), "shared", "data")
 		_ = os.MkdirAll(dataDir, 0o755)
-		env = append(env,
-			"NODE_ENV=production",
-			"PHLEET_APP="+spec.Slug,
-			"PHLEET_DATA_DIR="+dataDir,
-		)
+		m["NODE_ENV"] = "production"
+		m["PHLEET_APP"] = spec.Slug
+		m["PHLEET_DATA_DIR"] = dataDir
 	}
-	keys := make([]string, 0, len(spec.Env))
-	for k := range spec.Env {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		env = append(env, k+"="+spec.Env[k])
-	}
-	return env
+	// Task env is applied last so it can override inherited/built-in values.
+	applyEnv(m, spec.Env)
+	return envFromMap(m)
 }
 
 func (a *Agent) runTaskCommand(spec agentproto.TaskSpec, cwd, logPath string, env []string) (int, string, error) {

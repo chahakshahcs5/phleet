@@ -17,12 +17,28 @@ import (
 )
 
 const (
-	maxEditBytes     = 8 << 20
-	maxWriteBytes    = 32 << 20
-	maxDownloadBytes = 96 << 20
-	maxUploadBytes   = 64 << 20
-	uploadChunk      = 1 << 20
+	maxEditBytes  = 8 << 20
+	maxWriteBytes = 32 << 20
+	// Legacy downloads are returned inline as base64 JSON, so they share the
+	// same frame budget as the editor. New agents stream through the tunnel.
+	maxLegacyDownloadBytes = maxEditBytes
+	maxUploadBytes         = 64 << 20
+	uploadChunk            = 1 << 20
 )
+
+// fsReadMax bounds the inline (base64 JSON) file-read path. It must stay well
+// below maxAgentReplyBytes after base64 expansion; larger files use /download.
+func fsReadMax(raw string) int64 {
+	max := int64(maxEditBytes)
+	if raw == "" {
+		return max
+	}
+	var n int64
+	if _, err := fmt.Sscanf(raw, "%d", &n); err == nil && n > 0 && n < max {
+		max = n
+	}
+	return max
+}
 
 func (s *Server) writeChunked(ctx context.Context, serverID, target string, data []byte) error {
 	if len(data) == 0 {
@@ -74,13 +90,10 @@ func (s *Server) handleFSRead(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 400, fmt.Errorf("path is required"))
 		return
 	}
-	max := int64(maxEditBytes)
-	if v := r.URL.Query().Get("max"); v != "" {
-		var n int64
-		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 && n <= maxDownloadBytes {
-			max = n
-		}
-	}
+	// The editor path returns the file inline as base64 JSON. Do not let a
+	// caller ask for a size that would exceed the control WebSocket frame
+	// budget; larger files should use /download, which streams over the tunnel.
+	max := fsReadMax(r.URL.Query().Get("max"))
 	var res agentproto.FSReadResponse
 	if err := s.fsCall(r, agentproto.TypeFSRead, agentproto.FSReadRequest{Path: p, MaxBytes: max}, &res); err != nil {
 		apiErr(w, 502, err)
@@ -263,12 +276,12 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	// Fallback for agents that predate "fs" streams. New agents stream any
 	// size; the legacy path is capped at 96 MB and must not truncate silently.
 	var res agentproto.FSReadResponse
-	if err := s.fsCall(r, agentproto.TypeFSRead, agentproto.FSReadRequest{Path: p, MaxBytes: maxDownloadBytes}, &res); err != nil {
+	if err := s.fsCall(r, agentproto.TypeFSRead, agentproto.FSReadRequest{Path: p, MaxBytes: maxLegacyDownloadBytes}, &res); err != nil {
 		apiErr(w, 502, err)
 		return
 	}
 	if res.Truncated {
-		apiErr(w, 413, fmt.Errorf("file is larger than the %d MB download limit; update the agent to stream larger files", maxDownloadBytes>>20))
+		apiErr(w, 413, fmt.Errorf("file is larger than the %d MB fallback limit; update the agent to stream larger files", maxLegacyDownloadBytes>>20))
 		return
 	}
 	name := path.Base(res.Path)

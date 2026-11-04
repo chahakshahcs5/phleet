@@ -116,20 +116,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Roots == nil {
-		cfg.Roots = []string{home}
-	}
-	roots := make([]string, 0, len(cfg.Roots))
-	for _, r := range cfg.Roots {
-		abs, err := filepath.Abs(r)
-		if err != nil {
-			continue
-		}
-		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-			abs = resolved
-		}
-		roots = append(roots, filepath.Clean(abs))
-	}
+	roots := buildRoots(home, cfg.Roots)
 	if cfg.StateDir == "" {
 		cfg.StateDir = filepath.Join(home, ".phleet")
 	}

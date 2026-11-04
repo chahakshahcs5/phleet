@@ -1110,20 +1110,16 @@ func sameUser(pid int) bool {
 }
 
 func appEnv(spec AppSpec) []string {
-	env := sanitizeEnv(os.Environ())
+	m := envToMap(sanitizeEnv(os.Environ()))
 	// Addons must not inherit the app contract: HOST=0.0.0.0 in particular
-	// would contradict the loopback-only bind in their own args. This applies
-	// to every addon kind, not just databases and caches.
-	if spec.Addon || spec.Kind == "database" || spec.Kind == "cache" || spec.Kind == "objectstore" || spec.Kind == "file" {
-		keys := make([]string, 0, len(spec.Env))
-		for k := range spec.Env {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			env = append(env, k+"="+spec.Env[k])
-		}
-		return env
+	// would contradict the loopback-only bind in their own args. Delete both
+	// inherited and previously injected contract variables before applying the
+	// addon's own environment.
+	if isAddonSpec(spec) {
+		deleteEnv(m, "HOST", "PORT", "NODE_ENV", "PHLEET_APP", "PHLEET_PORT",
+			"PHLEET_WORKER", "PHLEET_DATA_DIR", "PHLEET_SECRETS_DIR")
+		applyEnv(m, spec.Env)
+		return envFromMap(m)
 	}
 	// The agent reaches apps over loopback. Binding 0.0.0.0 would expose the
 	// port on Wi-Fi too, which contradicts "phones never accept inbound".
@@ -1131,35 +1127,25 @@ func appEnv(spec AppSpec) []string {
 	if isWorkerSpec(spec) {
 		// A worker has no listener. Omit PORT and advertise the worker contract
 		// so a framework does not assume it is a web server.
-		env = append(env,
-			"NODE_ENV=production",
-			"PHLEET_APP="+spec.Slug,
-			"PHLEET_WORKER=1",
-		)
+		deleteEnv(m, "PORT", "HOST")
+		m["NODE_ENV"] = "production"
+		m["PHLEET_APP"] = spec.Slug
+		m["PHLEET_WORKER"] = "1"
 	} else {
-		env = append(env,
-			"PORT="+fmt.Sprint(appPort(spec)),
-			"HOST=127.0.0.1",
-			"NODE_ENV=production",
-			"PHLEET_APP="+spec.Slug,
-			"PHLEET_PORT="+fmt.Sprint(spec.Port),
-		)
+		m["PORT"] = fmt.Sprint(appPort(spec))
+		m["HOST"] = "127.0.0.1"
+		m["NODE_ENV"] = "production"
+		m["PHLEET_APP"] = spec.Slug
+		m["PHLEET_PORT"] = fmt.Sprint(spec.Port)
 	}
 	if spec.DataDir != "" {
-		env = append(env,
-			"PHLEET_DATA_DIR="+spec.DataDir,
-			"PHLEET_SECRETS_DIR="+filepath.Join(filepath.Dir(spec.DataDir), "secrets"),
-		)
+		m["PHLEET_DATA_DIR"] = spec.DataDir
+		m["PHLEET_SECRETS_DIR"] = filepath.Join(filepath.Dir(spec.DataDir), "secrets")
 	}
-	keys := make([]string, 0, len(spec.Env))
-	for k := range spec.Env {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		env = append(env, k+"="+spec.Env[k])
-	}
-	return env
+	// Project environment is applied last, so an explicit HOST/PORT/other
+	// override actually wins. envFromMap emits one entry per name.
+	applyEnv(m, spec.Env)
+	return envFromMap(m)
 }
 
 // appendAppLog adds a control-plane-visible line to an app's app.log. Static
