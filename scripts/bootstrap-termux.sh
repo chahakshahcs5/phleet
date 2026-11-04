@@ -47,6 +47,7 @@ die() { echo "error: $*" >&2; exit 1; }
 say() { printf '\033[1;32m::\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*"; }
 
+TOKEN="${TOKEN:-${PHLEET_BOOTSTRAP_TOKEN:-}}"
 [ -n "$SERVER" ] || die "--server is required"
 [ -n "$TOKEN" ] || die "--token is required"
 case "$SERVER" in

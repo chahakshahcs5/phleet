@@ -24,6 +24,9 @@ const (
 	KeyFile        = "session.key"
 	SigningKeyFile = "signing.key"
 	UpdateKeyFile  = "update.key"
+	// SessionEpochSetting is a database value included in admin-token
+	// sessions; bumping it revokes every existing admin session immediately.
+	SessionEpochSetting = "session_epoch"
 )
 
 func DefaultDataDir() string {

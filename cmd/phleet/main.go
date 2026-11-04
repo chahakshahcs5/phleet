@@ -17,11 +17,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"phleet/internal/cloudflare"
 	"phleet/internal/config"
+	"phleet/internal/secrets"
 	"phleet/internal/store"
 )
 
@@ -39,8 +41,12 @@ func main() {
 		os.Exit(servers(os.Args[2:]))
 	case "token":
 		os.Exit(printTokens(os.Args[2:]))
+	case "session":
+		os.Exit(revokeSessions(os.Args[2:]))
 	case "backup":
 		os.Exit(backupDB(os.Args[2:]))
+	case "restore-backup":
+		os.Exit(restoreBackup(os.Args[2:]))
 	case "deploy":
 		os.Exit(cliDeploy(os.Args[2:]))
 	case "logs":
@@ -67,7 +73,10 @@ func usage() {
   phleet servers [flags]       List registered phones.
   phleet token [-which admin|agent|both] [-rotate]
                                Print tokens, or generate new token file(s)
-  phleet backup [-out FILE]    Write a consistent snapshot of phleet.db
+  phleet session -revoke       Invalidate every existing panel session
+  phleet backup [-out FILE]    Write an encrypted snapshot of phleet.db
+  phleet restore-backup -in FILE -out DB [-force]
+                               Decrypt a snapshot for restore
   phleet deploy -project ID [-ref REF] [-wait]
   phleet logs -project ID [-server ID] [-bytes N]
   phleet exec -server ID -command "..." [-timeout SEC]
@@ -437,6 +446,11 @@ func printTokens(args []string) int {
 			}
 			tokens[target.name] = tok
 		}
+		if *which == "admin" || *which == "both" {
+			if err := bumpSessionEpoch(cfg); err != nil {
+				fmt.Fprintln(os.Stderr, "warning: admin sessions were not revoked:", err)
+			}
+		}
 		fmt.Fprintln(os.Stderr, "token file(s) updated; restart phleetd for the new token to take effect")
 	}
 	if *which == "admin" || *which == "both" {
@@ -446,6 +460,37 @@ func printTokens(args []string) int {
 		fmt.Println(tokens["agent"])
 	}
 	return 0
+}
+
+func revokeSessions(args []string) int {
+	fs := flag.NewFlagSet("session", flag.ExitOnError)
+	dataDir := fs.String("data", config.DefaultDataDir(), "data directory")
+	revoke := fs.Bool("revoke", false, "invalidate every existing panel session")
+	_ = fs.Parse(args)
+	if !*revoke {
+		fmt.Fprintln(os.Stderr, "usage: phleet session -revoke")
+		return 2
+	}
+	cfg, err := config.Load(*dataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	if err := bumpSessionEpoch(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	fmt.Println("all panel sessions revoked")
+	return 0
+}
+
+func bumpSessionEpoch(cfg *config.Config) error {
+	st, err := store.Open(cfg.DBPath())
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	return st.SetSetting(config.SessionEpochSetting, strconv.FormatInt(time.Now().UnixNano(), 10))
 }
 
 func rotateTokenFile(path string) (string, error) {
@@ -468,8 +513,13 @@ func rotateTokenFile(path string) (string, error) {
 func backupDB(args []string) int {
 	fs := flag.NewFlagSet("backup", flag.ExitOnError)
 	dataDir := fs.String("data", config.DefaultDataDir(), "data directory")
-	out := fs.String("out", "", "output file (default <data>/backups/phleet-<timestamp>.db)")
+	out := fs.String("out", "", "output file (default <data>/backups/phleet-<timestamp>.db.enc)")
+	encrypt := fs.Bool("encrypt", true, "encrypt the snapshot with session.key")
+	plaintext := fs.Bool("plaintext", false, "write an unencrypted snapshot (not recommended)")
 	_ = fs.Parse(args)
+	if *plaintext {
+		*encrypt = false
+	}
 
 	cfg, err := config.Load(*dataDir)
 	if err != nil {
@@ -477,10 +527,23 @@ func backupDB(args []string) int {
 		return 1
 	}
 	if *out == "" {
-		*out = filepath.Join(cfg.DataDir, "backups", "phleet-"+time.Now().Format("20060102-150405")+".db")
+		suffix := ".db.enc"
+		if !*encrypt {
+			suffix = ".db"
+		}
+		*out = filepath.Join(cfg.DataDir, "backups", "phleet-"+time.Now().Format("20060102-150405")+suffix)
 	}
 	abs, err := filepath.Abs(*out)
 	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	liveDB, _ := filepath.Abs(cfg.DBPath())
+	if filepath.Clean(abs) == filepath.Clean(liveDB) {
+		fmt.Fprintln(os.Stderr, "error: -out must not be the live database")
+		return 1
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
@@ -490,11 +553,104 @@ func backupDB(args []string) int {
 		return 1
 	}
 	defer st.Close()
-	if err := st.Backup(abs); err != nil {
+
+	if !*encrypt {
+		if err := st.Backup(abs); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return 1
+		}
+		fmt.Println(abs)
+		return 0
+	}
+
+	plain := abs + ".plain"
+	_ = os.Remove(plain)
+	if err := st.Backup(plain); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
+	_ = os.Chmod(plain, 0o600)
+	if _, err := secrets.EncryptFile(cfg.SessionKey, plain, abs); err != nil {
+		_ = os.Remove(plain)
+		_ = os.Remove(abs)
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	_ = os.Remove(plain)
 	fmt.Println(abs)
+	return 0
+}
+
+func restoreBackup(args []string) int {
+	fs := flag.NewFlagSet("restore-backup", flag.ExitOnError)
+	dataDir := fs.String("data", config.DefaultDataDir(), "data directory")
+	in := fs.String("in", "", "encrypted backup file")
+	out := fs.String("out", "", "destination database path")
+	force := fs.Bool("force", false, "overwrite the destination if it exists")
+	_ = fs.Parse(args)
+	if *in == "" || *out == "" {
+		fmt.Fprintln(os.Stderr, "error: -in and -out are required")
+		return 2
+	}
+	cfg, err := config.Load(*dataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	src, err := os.Open(*in)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	defer src.Close()
+	dst, err := filepath.Abs(*out)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	inAbs, _ := filepath.Abs(*in)
+	if filepath.Clean(inAbs) == filepath.Clean(dst) {
+		fmt.Fprintln(os.Stderr, "error: -in and -out must be different files")
+		return 1
+	}
+	if st, err := os.Stat(dst); err == nil && !*force {
+		fmt.Fprintf(os.Stderr, "error: %s already exists (use -force to overwrite)\n", dst)
+		return 1
+	} else if err == nil && st.IsDir() {
+		fmt.Fprintln(os.Stderr, "error: -out must be a file")
+		return 1
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	tmp := dst + ".tmp"
+	_ = os.Remove(tmp)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	if err := secrets.DecryptTo(cfg.SessionKey, src, f); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	if *force {
+		_ = os.Remove(dst)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	fmt.Println(dst)
 	return 0
 }
 

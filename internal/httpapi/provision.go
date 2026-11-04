@@ -105,11 +105,11 @@ func (s *Server) handleProvisionServer(w http.ResponseWriter, r *http.Request) {
 	if body.IdentityFile != "" {
 		args = append(args, "-i", body.IdentityFile, "-o", "IdentitiesOnly=yes")
 	}
-	args = append(args, target, "bash -s -- "+remoteBootstrapArgs(base, s.cfg.AgentToken, name))
+	args = append(args, target, "bash -s -- "+remoteBootstrapArgs(base, name))
 
 	if body.Async {
 		jobID := s.startJob("server.provision", target, 10*time.Minute, func(ctx context.Context, logf func(string)) error {
-			output, err := runProvision(ctx, sshBin, args, script)
+			output, err := runProvision(ctx, sshBin, args, script, s.cfg.AgentToken)
 			if output != "" {
 				logf(output)
 			}
@@ -122,7 +122,7 @@ func (s *Server) handleProvisionServer(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	output, runErr := runProvision(ctx, sshBin, args, script)
+	output, runErr := runProvision(ctx, sshBin, args, script, s.cfg.AgentToken)
 	if runErr != nil {
 		_ = s.st.AddEvent("ui", "server.provision_failed", target, runErr.Error())
 		writeJSON(w, 502, map[string]any{"ok": false, "error": runErr.Error(), "output": output})
@@ -132,9 +132,9 @@ func (s *Server) handleProvisionServer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "output": output})
 }
 
-func runProvision(ctx context.Context, sshBin string, args []string, script []byte) (string, error) {
+func runProvision(ctx context.Context, sshBin string, args []string, script []byte, token string) (string, error) {
 	cmd := exec.CommandContext(ctx, sshBin, args...)
-	cmd.Stdin = bytes.NewReader(script)
+	cmd.Stdin = bytes.NewReader(bootstrapPayload(script, token))
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -159,9 +159,18 @@ func (s *Server) bootstrapPath() string {
 	return candidates[0]
 }
 
-func remoteBootstrapArgs(base, token, name string) string {
-	return fmt.Sprintf("--server %s --token %s --name %s",
-		shellQuote(base), shellQuote(token), shellQuote(name))
+func remoteBootstrapArgs(base, name string) string {
+	return fmt.Sprintf("--server %s --name %s", shellQuote(base), shellQuote(name))
+}
+
+// bootstrapPayload prepends the enrollment token as a shell assignment read
+// from stdin. The token never appears in the local or remote process args.
+func bootstrapPayload(script []byte, token string) []byte {
+	prefix := "PHLEET_BOOTSTRAP_TOKEN=" + shellQuote(token) + "\n"
+	out := make([]byte, 0, len(prefix)+len(script))
+	out = append(out, prefix...)
+	out = append(out, script...)
+	return out
 }
 
 func shellQuote(v string) string {

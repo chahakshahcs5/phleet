@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"phleet/internal/config"
+	"phleet/internal/store"
 )
 
 func TestRotateTokenFile(t *testing.T) {
@@ -33,5 +36,63 @@ func TestRotateTokenFile(t *testing.T) {
 	}
 	if first == second {
 		t.Fatal("rotation produced the same token twice")
+	}
+}
+
+func TestEncryptedBackupRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(cfg.DBPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSetting("probe", "value"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	backup := filepath.Join(dir, "test.db.enc")
+	if code := backupDB([]string{"-data", dir, "-out", backup}); code != 0 {
+		t.Fatalf("backup exit = %d", code)
+	}
+	restored := filepath.Join(dir, "restored.db")
+	if code := restoreBackup([]string{"-data", dir, "-in", backup, "-out", restored}); code != 0 {
+		t.Fatalf("restore exit = %d", code)
+	}
+	st2, err := store.Open(restored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	v, err := st2.GetSetting("probe")
+	if err != nil || v != "value" {
+		t.Fatalf("restored setting = %q, err = %v", v, err)
+	}
+}
+
+func TestBumpSessionEpoch(t *testing.T) {
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bumpSessionEpoch(cfg); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(cfg.DBPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	v, err := st.GetSetting(config.SessionEpochSetting)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v == "" || v == "0" {
+		t.Fatalf("session epoch = %q, want a non-zero value", v)
 	}
 }

@@ -627,6 +627,7 @@ bypasses both. Each channel is independent; leave it blank to disable it.
 - On a Debian chroot the bootstrap deliberately does not grant the agent passwordless sudo: project code runs as the same user, so `apt-get`/`dpkg` access would make every project root-equivalent. Re-run the bootstrap after upgrading from an older release, or delete `/etc/sudoers.d/phleet`, to remove the legacy rule.
 - Re-running the bootstrap on an already-enrolled phone is rejected until you delete the phone in **Fleet → Server → Settings** (or keep its existing `agent.token`). This prevents the shared enrollment token from taking over an existing device.
 - **Settings → Users** creates password accounts with `admin`, `deployer` or `viewer` roles. Sessions are signed user cookies using a dedicated `signing.key` (separate from the `session.key` that encrypts env, TOTP and backups); role changes take effect on the next request, and disabling an account or resetting its password invalidates existing sessions. Per-user TOTP is available under Security, and a used code cannot be replayed.
+- Use `phleet session -revoke` to invalidate every panel session immediately, for example after rotating the admin token. Rotating the admin token also bumps the same epoch automatically.
 - **Settings → API tokens** creates scoped bearer tokens. `viewer` tokens are read-only; `deployer` tokens can only drive project lifecycle actions; `admin` tokens have the same access as the admin token. All are excluded from credentials, source archives, backups, file contents, jobs and token management unless admin. Revocation is immediate.
 - Admin login can require a TOTP second factor (**Settings → Security → Set up 2FA**). If the authenticator is lost, run `phleet totp -disable` on the control-plane host as a break-glass recovery.
 - Agents self-update from an Ed25519-signed manifest. `phleetd` keeps the signing key in `update.key` and serves the public key at `/download/update.pub`; the bootstrap pins it as `update.pub`. An agent replaces itself atomically only after verifying the signature and SHA-256, and checks every six hours. Bump `config.Version` when publishing a new agent build.
@@ -680,10 +681,12 @@ Running phones as servers has real limits: no cgroups, no containers without roo
 ## Development
 
 ```powershell
-# consistent snapshot of the control-plane database (safe while phleetd runs).
-# The snapshot is plaintext and does not include session.key/signing.key; keep
-# those key files with it or encrypted env/TOTP/backups cannot be recovered.
-.\dist\phleet.exe backup -data "$env:ProgramData\phleet" -out D:\backups\phleet.db
+# encrypted, consistent snapshot of the control-plane database (safe while phleetd runs).
+# It does not include session.key/signing.key; keep those key files with it or
+# encrypted env/TOTP/backups cannot be recovered. Use -plaintext only if you
+# really need an unencrypted dump, and -out a .db path for a plaintext copy.
+.\dist\phleet.exe backup -data "$env:ProgramData\phleet" -out D:\backups\phleet.db.enc
+.\dist\phleet.exe restore-backup -data "$env:ProgramData\phleet" -in D:\backups\phleet.db.enc -out D:\phleet-restore.db
 
 # small Prometheus scrape (admin token required)
 curl -H "Authorization: Bearer $env:PHLEET_ADMIN" http://127.0.0.1:8080/metrics

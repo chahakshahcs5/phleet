@@ -407,8 +407,17 @@ func (s *Server) signPayload(payload string) string {
 	return payload + "|" + hex.EncodeToString(mac.Sum(nil))
 }
 
+func (s *Server) sessionEpoch() int64 {
+	raw, err := s.st.GetSetting(config.SessionEpochSetting)
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	return n
+}
+
 func (s *Server) sign(exp int64) string {
-	return s.signPayload("phleet|" + strconv.FormatInt(exp, 10))
+	return s.signPayload("phleet|admin|" + strconv.FormatInt(s.sessionEpoch(), 10) + "|" + strconv.FormatInt(exp, 10))
 }
 
 func (s *Server) userSession(userID string, version, exp int64) string {
@@ -445,14 +454,21 @@ func (s *Server) sessionUserID(v string) (string, int64, bool) {
 
 func (s *Server) validSession(v string) bool {
 	parts := strings.Split(v, "|")
-	if len(parts) != 3 || parts[0] != "phleet" {
+	if len(parts) != 5 || parts[0] != "phleet" || parts[1] != "admin" {
 		return false
 	}
-	exp, err := strconv.ParseInt(parts[1], 10, 64)
+	epoch, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		return false
+	}
+	exp, err := strconv.ParseInt(parts[3], 10, 64)
 	if err != nil || time.Now().Unix() > exp {
 		return false
 	}
-	expect := s.sign(exp)
+	if epoch != s.sessionEpoch() {
+		return false
+	}
+	expect := s.signPayload("phleet|admin|" + parts[2] + "|" + parts[3])
 	return subtle.ConstantTimeCompare([]byte(expect), []byte(v)) == 1
 }
 

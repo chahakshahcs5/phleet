@@ -88,6 +88,10 @@ func (s *Server) handlePutBackupRemote(w http.ResponseWriter, r *http.Request) {
 	if cfg.RclonePath == "" {
 		cfg.RclonePath = "rclone"
 	}
+	if !validRclonePath(cfg.RclonePath) {
+		apiErr(w, 400, errors.New("rclone executable must be named rclone (or rclone.exe)"))
+		return
+	}
 	if cfg.Enabled && cfg.Target == "" {
 		apiErr(w, 400, errors.New("an rclone target is required when off-site backups are enabled"))
 		return
@@ -175,9 +179,20 @@ func (s *Server) handleTestBackupRemote(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, 200, map[string]any{"ok": true, "output": truncateOutput(out, 2000)})
 }
 
+func validRclonePath(p string) bool {
+	if p == "" {
+		return true
+	}
+	if strings.ContainsAny(p, "\r\n\x00") {
+		return false
+	}
+	base := strings.ToLower(filepath.Base(p))
+	return base == "rclone" || base == "rclone.exe"
+}
+
 func runRclone(ctx context.Context, cfg model.BackupRemoteConfig, args ...string) (string, error) {
 	path := cfg.RclonePath
-	if path == "" {
+	if path == "" || !validRclonePath(path) {
 		path = "rclone"
 	}
 	cmd := exec.CommandContext(ctx, path, args...)

@@ -286,6 +286,21 @@ func TestViewerAPITokenIsReadOnly(t *testing.T) {
 	}
 }
 
+func TestAdminSessionEpochRevocation(t *testing.T) {
+	s := testServer(t)
+	exp := time.Now().Add(time.Hour).Unix()
+	cookie := s.sign(exp)
+	if !s.validSession(cookie) {
+		t.Fatal("admin session should be valid")
+	}
+	if err := s.st.SetSetting(config.SessionEpochSetting, "1"); err != nil {
+		t.Fatal(err)
+	}
+	if s.validSession(cookie) {
+		t.Fatal("admin session must be invalid after the epoch is bumped")
+	}
+}
+
 func TestPasswordResetInvalidatesSessions(t *testing.T) {
 	s := testServer(t)
 	hash, err := auth.HashPassword("password123")
