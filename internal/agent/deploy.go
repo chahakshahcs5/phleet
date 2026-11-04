@@ -126,6 +126,14 @@ func (a *Agent) handleDeploy(ctx context.Context, req agentproto.DeployRequest, 
 		}
 		logf("extracted %d files (%s)", res.Files, formatBytes(res.Bytes))
 	} else {
+		authEnv, authCleanup, err := a.prepareGitAuth(req.GitAuth)
+		if err != nil {
+			fail("git auth: " + err.Error())
+			return
+		}
+		defer authCleanup()
+		gitEnv := append(appEnvForDeploy(req), authEnv...)
+
 		ref := strings.TrimSpace(req.Ref)
 		branch := req.Branch
 		if ref != "" && !isHexRef(ref) {
@@ -145,7 +153,7 @@ func (a *Agent) handleDeploy(ctx context.Context, req agentproto.DeployRequest, 
 			fail("git is not installed on this phone")
 			return
 		}
-		err := a.runCommand(cloneCtx, base, a.gitPath, cloneArgs, appEnvForDeploy(req), func(line string) {
+		err = a.runCommand(cloneCtx, base, a.gitPath, cloneArgs, gitEnv, func(line string) {
 			logf("git: %s", line)
 		})
 		cloneCancel()
@@ -166,14 +174,14 @@ func (a *Agent) handleDeploy(ctx context.Context, req agentproto.DeployRequest, 
 				logf("fetching commit %s", ref)
 				fetchCtx, fetchCancel := context.WithTimeout(ctx, 10*time.Minute)
 				err := a.runCommand(fetchCtx, releaseDir, a.gitPath,
-					[]string{"fetch", "--depth", "1", "origin", ref}, appEnvForDeploy(req), func(line string) {
+					[]string{"fetch", "--depth", "1", "origin", ref}, gitEnv, func(line string) {
 						logf("git: %s", line)
 					})
 				fetchCancel()
 				if err == nil {
 					checkoutCtx, checkoutCancel := context.WithTimeout(ctx, 2*time.Minute)
 					err = a.runCommand(checkoutCtx, releaseDir, a.gitPath,
-						[]string{"checkout", "--detach", ref}, appEnvForDeploy(req), func(line string) {
+						[]string{"checkout", "--detach", ref}, gitEnv, func(line string) {
 							logf("git: %s", line)
 						})
 					checkoutCancel()

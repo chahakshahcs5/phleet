@@ -87,6 +87,9 @@ type Project struct {
 	Slug             string `json:"slug"`
 	Repo             string `json:"repo"`
 	Branch           string `json:"branch"`
+	GitAuthType      string `json:"gitAuthType,omitempty"`
+	GitAuthUsername  string `json:"gitAuthUsername,omitempty"`
+	GitAuthEnc       string `json:"-"`
 	Runtime          string `json:"runtime"`
 	BuildCmd         string `json:"buildCmd"`
 	StartCmd         string `json:"startCmd"`

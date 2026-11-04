@@ -12,9 +12,10 @@ func (s *Store) CreateProject(p model.Project) error {
 		p.CreatedAt = now()
 	}
 	_, err := s.db.Exec(`INSERT INTO projects
-(id,name,slug,repo,branch,runtime,build_cmd,start_cmd,health_path,static_dir,hostname,custom_hostname,env_enc,selector,replicas,pinned_server,source_type,source_size,source_updated_at,basic_auth_user,basic_auth_hash,parent_id,kind,stack_order,webhook_secret_enc,created_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		p.ID, p.Name, p.Slug, p.Repo, p.Branch, p.Runtime, p.BuildCmd, p.StartCmd,
+(id,name,slug,repo,branch,git_auth_type,git_auth_username,git_auth_enc,runtime,build_cmd,start_cmd,health_path,static_dir,hostname,custom_hostname,env_enc,selector,replicas,pinned_server,source_type,source_size,source_updated_at,basic_auth_user,basic_auth_hash,parent_id,kind,stack_order,webhook_secret_enc,created_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		p.ID, p.Name, p.Slug, p.Repo, p.Branch, p.GitAuthType, p.GitAuthUsername, p.GitAuthEnc,
+		p.Runtime, p.BuildCmd, p.StartCmd,
 		p.HealthPath, p.StaticDir, p.Hostname, p.CustomHostname, p.EnvEnc, p.Selector, p.Replicas, p.PinnedServer,
 		sourceType(p.SourceType), p.SourceSize, p.SourceUpdatedAt, p.BasicAuthUser, p.BasicAuthHash,
 		p.ParentID, kindOrDefault(p.Kind), p.StackOrder, p.WebhookSecretEnc, p.CreatedAt)
@@ -37,10 +38,11 @@ func sourceType(v string) string {
 }
 
 func (s *Store) UpdateProject(p model.Project) error {
-	_, err := s.db.Exec(`UPDATE projects SET name=?, repo=?, branch=?, runtime=?, build_cmd=?,
+	_, err := s.db.Exec(`UPDATE projects SET name=?, repo=?, branch=?, git_auth_type=?, git_auth_username=?, git_auth_enc=?, runtime=?, build_cmd=?,
 start_cmd=?, health_path=?, static_dir=?, hostname=?, custom_hostname=?, env_enc=?, selector=?, replicas=?, pinned_server=?,
 source_type=?, source_size=?, source_updated_at=?, basic_auth_user=?, basic_auth_hash=?, parent_id=?, kind=?, stack_order=?, webhook_secret_enc=? WHERE id=?`,
-		p.Name, p.Repo, p.Branch, p.Runtime, p.BuildCmd, p.StartCmd, p.HealthPath, p.StaticDir, p.Hostname, p.CustomHostname,
+		p.Name, p.Repo, p.Branch, p.GitAuthType, p.GitAuthUsername, p.GitAuthEnc, p.Runtime, p.BuildCmd, p.StartCmd,
+		p.HealthPath, p.StaticDir, p.Hostname, p.CustomHostname,
 		p.EnvEnc, p.Selector, p.Replicas, p.PinnedServer, sourceType(p.SourceType),
 		p.SourceSize, p.SourceUpdatedAt, p.BasicAuthUser, p.BasicAuthHash, p.ParentID, kindOrDefault(p.Kind), p.StackOrder, p.WebhookSecretEnc, p.ID)
 	return err
@@ -54,7 +56,8 @@ func (s *Store) UpdateProjectSource(id, sourceType string, size, updatedAt int64
 
 func (s *Store) scanProject(row interface{ Scan(...any) error }) (model.Project, error) {
 	var p model.Project
-	err := row.Scan(&p.ID, &p.Name, &p.Slug, &p.Repo, &p.Branch, &p.Runtime, &p.BuildCmd,
+	err := row.Scan(&p.ID, &p.Name, &p.Slug, &p.Repo, &p.Branch, &p.GitAuthType, &p.GitAuthUsername, &p.GitAuthEnc,
+		&p.Runtime, &p.BuildCmd,
 		&p.StartCmd, &p.HealthPath, &p.StaticDir, &p.Hostname, &p.CustomHostname, &p.EnvEnc, &p.Selector, &p.Replicas, &p.PinnedServer,
 		&p.SourceType, &p.SourceSize, &p.SourceUpdatedAt, &p.BasicAuthUser, &p.BasicAuthHash,
 		&p.ParentID, &p.Kind, &p.StackOrder, &p.WebhookSecretEnc, &p.CreatedAt)
@@ -64,7 +67,7 @@ func (s *Store) scanProject(row interface{ Scan(...any) error }) (model.Project,
 	return p, err
 }
 
-const projectCols = `id,name,slug,repo,branch,runtime,build_cmd,start_cmd,health_path,static_dir,hostname,custom_hostname,env_enc,selector,replicas,pinned_server,source_type,source_size,source_updated_at,basic_auth_user,basic_auth_hash,parent_id,kind,stack_order,webhook_secret_enc,created_at`
+const projectCols = `id,name,slug,repo,branch,git_auth_type,git_auth_username,git_auth_enc,runtime,build_cmd,start_cmd,health_path,static_dir,hostname,custom_hostname,env_enc,selector,replicas,pinned_server,source_type,source_size,source_updated_at,basic_auth_user,basic_auth_hash,parent_id,kind,stack_order,webhook_secret_enc,created_at`
 
 func (s *Store) GetProject(id string) (model.Project, error) {
 	return s.scanProject(s.db.QueryRow(`SELECT `+projectCols+` FROM projects WHERE id=?`, id))

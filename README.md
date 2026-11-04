@@ -200,6 +200,12 @@ restarts the app once to move it behind the switchboard. A phone that reboots re
 Uploaded projects can replace their source later under **Project → Settings → Source** (upload a new folder, then
 Deploy). Source archives are capped at 64 MB; empty directories are not preserved.
 
+**Private repositories.** Under **Project → Settings → Configuration → Repository access**, choose an HTTPS token or
+password, or paste an SSH private key. Credentials are encrypted on the control plane, sent to the phone only for the
+clone/fetch step, and never injected into the app environment. Leave the secret blank when saving to keep the existing
+value. A stack's credentials live on the stack parent and apply to every service; the phone's SSH client uses
+`StrictHostKeyChecking=accept-new` for key-based clones and requires an unencrypted private key.
+
 A single project is **one workload** — a web app, a static site, or a worker. If a repository contains a UI,
 an API and a worker, use a **multi-service stack** so the UI still treats them as one project:
 

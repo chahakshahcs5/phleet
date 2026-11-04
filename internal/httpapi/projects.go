@@ -58,6 +58,7 @@ type projectView struct {
 	URL        string            `json:"url"`
 	Webhook    bool              `json:"webhook"`
 	BasicAuth  bool              `json:"basicAuth"`
+	GitAuth    bool              `json:"gitAuth"`
 }
 
 func isTerminalDeploy(s string) bool {
@@ -80,6 +81,7 @@ func (s *Server) buildProjectView(p model.Project, withEnv bool) projectView {
 	v := projectView{Project: p, Env: nil, Placements: []placementView{}, Services: []projectView{}}
 	v.Webhook = p.WebhookSecretEnc != ""
 	v.BasicAuth = p.BasicAuthUser != "" && p.BasicAuthHash != ""
+	v.GitAuth = p.GitAuthEnc != ""
 	v.Addons = s.projectAddons(p.ID)
 	if p.Kind == "stack" {
 		children, _ := s.st.ListChildProjects(p.ID)
@@ -150,6 +152,101 @@ func (s *Server) decryptEnv(p model.Project) (map[string]string, error) {
 		return map[string]string{}, err
 	}
 	return out, nil
+}
+
+func normalizeGitAuthType(v string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "none":
+		return "", nil
+	case "https", "ssh":
+		return strings.ToLower(strings.TrimSpace(v)), nil
+	default:
+		return "", errors.New("git auth type must be https, ssh or none")
+	}
+}
+
+func (s *Server) setNewGitAuth(typ, user, secret string) (string, string, string, error) {
+	kind, err := normalizeGitAuthType(typ)
+	if err != nil {
+		return "", "", "", err
+	}
+	if kind == "" {
+		return "", "", "", nil
+	}
+	user = strings.TrimSpace(user)
+	secret = strings.TrimSpace(secret)
+	if kind == "https" {
+		if user == "" {
+			user = "git"
+		}
+		if secret == "" {
+			return "", "", "", errors.New("a token or password is required for HTTPS git auth")
+		}
+	} else {
+		user = ""
+		if secret == "" {
+			return "", "", "", errors.New("a private key is required for SSH git auth")
+		}
+		if !strings.Contains(secret, "PRIVATE KEY") {
+			return "", "", "", errors.New("the SSH value does not look like a private key")
+		}
+	}
+	if len(secret) > 256<<10 {
+		return "", "", "", errors.New("git credential is too large")
+	}
+	enc, err := secrets.Encrypt(s.cfg.SessionKey, []byte(secret))
+	if err != nil {
+		return "", "", "", err
+	}
+	return kind, user, enc, nil
+}
+
+func (s *Server) applyGitAuthUpdate(p *model.Project, typ, user, secret *string) error {
+	if typ == nil && user == nil && secret == nil {
+		return nil
+	}
+	currentType := p.GitAuthType
+	nextType := currentType
+	if typ != nil {
+		var err error
+		nextType, err = normalizeGitAuthType(*typ)
+		if err != nil {
+			return err
+		}
+	}
+	if nextType == "" {
+		p.GitAuthType, p.GitAuthUsername, p.GitAuthEnc = "", "", ""
+		return nil
+	}
+	nextUser := p.GitAuthUsername
+	if user != nil {
+		nextUser = strings.TrimSpace(*user)
+	}
+	if nextType == "https" && nextUser == "" {
+		nextUser = "git"
+	}
+	if nextType == "ssh" {
+		nextUser = ""
+	}
+	nextEnc := p.GitAuthEnc
+	if secret != nil && strings.TrimSpace(*secret) != "" {
+		value := strings.TrimSpace(*secret)
+		if nextType == "ssh" && !strings.Contains(value, "PRIVATE KEY") {
+			return errors.New("the SSH value does not look like a private key")
+		}
+		if len(value) > 256<<10 {
+			return errors.New("git credential is too large")
+		}
+		enc, err := secrets.Encrypt(s.cfg.SessionKey, []byte(value))
+		if err != nil {
+			return err
+		}
+		nextEnc = enc
+	} else if nextType != currentType || nextEnc == "" {
+		return errors.New("a token/password or private key is required for the selected git auth type")
+	}
+	p.GitAuthType, p.GitAuthUsername, p.GitAuthEnc = nextType, nextUser, nextEnc
+	return nil
 }
 
 func (s *Server) encryptEnv(env map[string]string) (string, error) {
@@ -443,6 +540,19 @@ func (s *Server) hasInflight(projectID string) bool {
 	return false
 }
 
+func (s *Server) deployGitAuth(p model.Project) (agentproto.GitAuth, error) {
+	if p.GitAuthEnc == "" || p.GitAuthType == "" {
+		return agentproto.GitAuth{}, nil
+	}
+	raw, err := secrets.Decrypt(s.cfg.SessionKey, p.GitAuthEnc)
+	if err != nil {
+		return agentproto.GitAuth{}, fmt.Errorf("cannot decrypt git credentials: %w", err)
+	}
+	return agentproto.GitAuth{
+		Type: p.GitAuthType, Username: p.GitAuthUsername, Secret: string(raw),
+	}, nil
+}
+
 // startDeployment creates a deployment row and sends the plan to one phone.
 func (s *Server) startDeployment(p model.Project, pl model.Placement, ref string) (model.Deployment, error) {
 	if !s.hub.Online(pl.ServerID) {
@@ -459,9 +569,11 @@ func (s *Server) startDeployment(p model.Project, pl model.Placement, ref string
 	sourceID := p.ID
 	sourceType := p.SourceType
 	repo := p.Repo
+	authProject := p
 	if p.ParentID != "" {
 		if parent, err := s.st.GetProject(p.ParentID); err == nil {
 			sourceID = parent.ID
+			authProject = parent
 			if strings.TrimSpace(repo) == "" {
 				repo = parent.Repo
 			}
@@ -478,6 +590,14 @@ func (s *Server) startDeployment(p model.Project, pl model.Placement, ref string
 		sourcePath = "/api/projects/" + sourceID + "/source"
 	} else if strings.TrimSpace(repo) == "" {
 		return model.Deployment{}, errors.New("repository is not set")
+	}
+	gitAuth := agentproto.GitAuth{}
+	if sourceType == "git" {
+		var err error
+		gitAuth, err = s.deployGitAuth(authProject)
+		if err != nil {
+			return model.Deployment{}, err
+		}
 	}
 	if p.Kind != "static" && strings.TrimSpace(p.StartCmd) == "" {
 		return model.Deployment{}, errors.New("start command is not set")
@@ -536,7 +656,7 @@ func (s *Server) startDeployment(p model.Project, pl model.Placement, ref string
 		DeploymentID: dep.ID, ProjectID: p.ID, Slug: p.Slug, Name: p.Name,
 		Kind: p.Kind, Ref: ref, Repo: repo, Branch: p.Branch, BuildCmd: p.BuildCmd, StartCmd: p.StartCmd,
 		StaticDir: p.StaticDir, HealthPath: p.HealthPath, Port: pl.Port, SourcePath: sourcePath,
-		Env: env, Secrets: secretFiles, KeepReleases: 5, RestartPolicy: "always",
+		GitAuth: gitAuth, Env: env, Secrets: secretFiles, KeepReleases: 5, RestartPolicy: "always",
 	}
 	if p.Kind == "worker" {
 		// A worker has no listener; an HTTP health path would always fail.
@@ -583,24 +703,27 @@ type createServiceBody struct {
 }
 
 type createProjectBody struct {
-	Name           string              `json:"name"`
-	Slug           string              `json:"slug"`
-	Kind           string              `json:"kind"`
-	Repo           string              `json:"repo"`
-	Branch         string              `json:"branch"`
-	BuildCmd       string              `json:"buildCmd"`
-	StartCmd       string              `json:"startCmd"`
-	StaticDir      string              `json:"staticDir"`
-	HealthPath     string              `json:"healthPath"`
-	CustomHostname string              `json:"customHostname"`
-	ServerID       string              `json:"serverId"`
-	PinnedServer   string              `json:"pinnedServer"`
-	Selector       string              `json:"selector"`
-	Replicas       int                 `json:"replicas"`
-	SourceType     string              `json:"sourceType"`
-	Env            map[string]string   `json:"env"`
-	Stack          bool                `json:"stack"`
-	Services       []createServiceBody `json:"services"`
+	Name            string              `json:"name"`
+	Slug            string              `json:"slug"`
+	Kind            string              `json:"kind"`
+	Repo            string              `json:"repo"`
+	Branch          string              `json:"branch"`
+	GitAuthType     string              `json:"gitAuthType"`
+	GitAuthUsername string              `json:"gitAuthUsername"`
+	GitAuthSecret   string              `json:"gitAuthSecret"`
+	BuildCmd        string              `json:"buildCmd"`
+	StartCmd        string              `json:"startCmd"`
+	StaticDir       string              `json:"staticDir"`
+	HealthPath      string              `json:"healthPath"`
+	CustomHostname  string              `json:"customHostname"`
+	ServerID        string              `json:"serverId"`
+	PinnedServer    string              `json:"pinnedServer"`
+	Selector        string              `json:"selector"`
+	Replicas        int                 `json:"replicas"`
+	SourceType      string              `json:"sourceType"`
+	Env             map[string]string   `json:"env"`
+	Stack           bool                `json:"stack"`
+	Services        []createServiceBody `json:"services"`
 }
 
 func normalizeHealthPath(v string) string {
@@ -812,8 +935,16 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	repo := strings.TrimSpace(body.Repo)
+	gitType, gitUser, gitEnc := "", "", ""
 	if srcType == "upload" {
 		repo = ""
+	} else {
+		var err error
+		gitType, gitUser, gitEnc, err = s.setNewGitAuth(body.GitAuthType, body.GitAuthUsername, body.GitAuthSecret)
+		if err != nil {
+			apiErr(w, 400, err)
+			return
+		}
 	}
 
 	startCmd := strings.TrimSpace(body.StartCmd)
@@ -823,6 +954,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	}
 	p := model.Project{
 		ID: uuid.NewString(), Name: name, Slug: slug, Repo: repo,
+		GitAuthType: gitType, GitAuthUsername: gitUser, GitAuthEnc: gitEnc,
 		Branch: branch, Runtime: "auto", BuildCmd: strings.TrimSpace(body.BuildCmd),
 		StartCmd: startCmd, StaticDir: staticDir, HealthPath: healthPath, Hostname: hostname,
 		CustomHostname: customHostname, Kind: kind,
@@ -873,11 +1005,20 @@ func (s *Server) handleCreateStack(w http.ResponseWriter, body createProjectBody
 		return
 	}
 	repo := strings.TrimSpace(body.Repo)
+	gitType, gitUser, gitEnc := "", "", ""
 	if srcType == "upload" {
 		repo = ""
-	} else if repo == "" {
-		apiErr(w, 400, errors.New("repository is required"))
-		return
+	} else {
+		if repo == "" {
+			apiErr(w, 400, errors.New("repository is required"))
+			return
+		}
+		var err error
+		gitType, gitUser, gitEnc, err = s.setNewGitAuth(body.GitAuthType, body.GitAuthUsername, body.GitAuthSecret)
+		if err != nil {
+			apiErr(w, 400, err)
+			return
+		}
 	}
 	branch := strings.TrimSpace(body.Branch)
 	if branch == "" {
@@ -911,6 +1052,7 @@ func (s *Server) handleCreateStack(w http.ResponseWriter, body createProjectBody
 	now := time.Now().Unix()
 	parent := model.Project{
 		ID: uuid.NewString(), Name: name, Slug: parentSlug, Repo: repo, Branch: branch,
+		GitAuthType: gitType, GitAuthUsername: gitUser, GitAuthEnc: gitEnc,
 		Runtime: "auto", Hostname: "", Selector: "", Replicas: 1, PinnedServer: pinned,
 		SourceType: srcType, Kind: "stack", EnvEnc: envEnc, CreatedAt: now,
 	}
@@ -1029,6 +1171,9 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 		Name              *string            `json:"name"`
 		Repo              *string            `json:"repo"`
 		Branch            *string            `json:"branch"`
+		GitAuthType       *string            `json:"gitAuthType"`
+		GitAuthUsername   *string            `json:"gitAuthUsername"`
+		GitAuthSecret     *string            `json:"gitAuthSecret"`
 		BuildCmd          *string            `json:"buildCmd"`
 		StartCmd          *string            `json:"startCmd"`
 		StaticDir         *string            `json:"staticDir"`
@@ -1054,6 +1199,10 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Branch != nil && strings.TrimSpace(*body.Branch) != "" {
 		p.Branch = strings.TrimSpace(*body.Branch)
+	}
+	if err := s.applyGitAuthUpdate(&p, body.GitAuthType, body.GitAuthUsername, body.GitAuthSecret); err != nil {
+		apiErr(w, 400, err)
+		return
 	}
 	if body.BuildCmd != nil {
 		p.BuildCmd = strings.TrimSpace(*body.BuildCmd)

@@ -274,6 +274,15 @@ type Proc struct {
 // DeployRequest is a self-contained plan executed by the agent. The control
 // plane only observes: if it disappears mid-deploy, the agent still finishes
 // or rolls back on its own.
+// GitAuth carries one deployment's repository credentials. The control plane
+// encrypts them at rest and only sends them over the authenticated agent
+// connection; they are never written to the project environment.
+type GitAuth struct {
+	Type     string `json:"type,omitempty"` // https | ssh
+	Username string `json:"username,omitempty"`
+	Secret   string `json:"secret,omitempty"`
+}
+
 type DeployRequest struct {
 	DeploymentID  string            `json:"deploymentId"`
 	ProjectID     string            `json:"projectId"`
@@ -283,6 +292,7 @@ type DeployRequest struct {
 	Ref           string            `json:"ref,omitempty"`
 	Repo          string            `json:"repo"`
 	Branch        string            `json:"branch"`
+	GitAuth       GitAuth           `json:"gitAuth,omitempty"`
 	BuildCmd      string            `json:"buildCmd"`
 	StartCmd      string            `json:"startCmd"`
 	StaticDir     string            `json:"staticDir,omitempty"`

@@ -15,6 +15,7 @@ func TestProjectPlacementAndDeployments(t *testing.T) {
 		ID: "p1", Name: "Demo", Slug: "demo", Repo: "https://example.com/x.git",
 		Branch: "main", BuildCmd: "npm ci", StartCmd: "node server.js",
 		HealthPath: "/health", Hostname: "demo.example.com", EnvEnc: "cipher",
+		GitAuthType: "https", GitAuthUsername: "deploy", GitAuthEnc: "git-cipher",
 	}
 	if err := st.CreateProject(p); err != nil {
 		t.Fatal(err)
@@ -22,6 +23,9 @@ func TestProjectPlacementAndDeployments(t *testing.T) {
 	got, err := st.GetProjectBySlug("demo")
 	if err != nil || got.ID != "p1" || got.HealthPath != "/health" {
 		t.Fatalf("get by slug: %v %+v", err, got)
+	}
+	if got.GitAuthType != "https" || got.GitAuthUsername != "deploy" || got.GitAuthEnc != "git-cipher" {
+		t.Fatalf("git auth did not round-trip: %+v", got)
 	}
 	if _, err := st.GetProjectByHostname("demo.example.com"); err != nil {
 		t.Fatalf("get by hostname: %v", err)
