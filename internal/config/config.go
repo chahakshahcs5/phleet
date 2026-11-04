@@ -15,11 +15,15 @@ import (
 )
 
 const (
-	Version       = "0.16.0"
-	AdminFile     = "admin_token"
-	AgentFile     = "agent_token"
-	KeyFile       = "session.key"
-	UpdateKeyFile = "update.key"
+	Version   = "0.16.0"
+	AdminFile = "admin_token"
+	AgentFile = "agent_token"
+	// KeyFile is the data-encryption key used for env, secret files, TOTP and
+	// backups. The name is historical; SigningKeyFile is separate so rotating
+	// one does not make the other's data unreadable.
+	KeyFile        = "session.key"
+	SigningKeyFile = "signing.key"
+	UpdateKeyFile  = "update.key"
 )
 
 func DefaultDataDir() string {
@@ -46,6 +50,7 @@ type Config struct {
 	AdminToken     string
 	AgentToken     string
 	SessionKey     []byte
+	SigningKey     []byte
 	ServerSecret   string
 	UpdateKey      ed25519.PrivateKey
 }
@@ -72,6 +77,10 @@ func Load(dataDir string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	signingKey, err := readOrCreate(filepath.Join(dataDir, SigningKeyFile), 64)
+	if err != nil {
+		return nil, err
+	}
 	updateKey, err := loadOrCreateUpdateKey(filepath.Join(dataDir, UpdateKeyFile))
 	if err != nil {
 		return nil, err
@@ -81,6 +90,7 @@ func Load(dataDir string) (*Config, error) {
 		AdminToken: admin,
 		AgentToken: agent,
 		SessionKey: []byte(key),
+		SigningKey: []byte(signingKey),
 		UpdateKey:  updateKey,
 	}, nil
 }

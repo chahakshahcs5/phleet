@@ -256,15 +256,17 @@ type BackupDrillConfig struct {
 // User is a panel account. Password hashes and TOTP secrets never leave the
 // control plane through the API.
 type User struct {
-	ID           string `json:"id"`
-	Username     string `json:"username"`
-	Role         string `json:"role"`
-	Disabled     bool   `json:"disabled"`
-	CreatedAt    int64  `json:"createdAt"`
-	UpdatedAt    int64  `json:"updatedAt"`
-	PasswordHash string `json:"-"`
-	TOTPSecret   string `json:"-"`
-	TOTPPending  string `json:"-"`
+	ID             string `json:"id"`
+	Username       string `json:"username"`
+	Role           string `json:"role"`
+	Disabled       bool   `json:"disabled"`
+	CreatedAt      int64  `json:"createdAt"`
+	UpdatedAt      int64  `json:"updatedAt"`
+	PasswordHash   string `json:"-"`
+	TOTPSecret     string `json:"-"`
+	TOTPPending    string `json:"-"`
+	TOTPLastStep   int64  `json:"-"`
+	SessionVersion int64  `json:"-"`
 }
 
 // APIToken is a scoped bearer credential for automation. The raw token is

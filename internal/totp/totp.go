@@ -53,24 +53,32 @@ func Code(secret string, at time.Time) (string, error) {
 	return stepCode(secret, uint64(at.Unix()/30))
 }
 
-// Validate accepts the current interval plus one step either side, which
-// tolerates modest clock drift.
-func Validate(secret, code string, at time.Time) bool {
+// ValidateStep accepts the current interval plus one step either side, which
+// tolerates modest clock drift. It returns the matched time step so callers can
+// persist it and reject replay of the same code.
+func ValidateStep(secret, code string, at time.Time) (uint64, bool) {
 	code = strings.TrimSpace(code)
 	if len(code) != 6 {
-		return false
+		return 0, false
 	}
 	step := uint64(at.Unix() / 30)
 	for _, delta := range []int64{-1, 0, 1} {
-		want, err := stepCode(secret, uint64(int64(step)+delta))
+		candidate := uint64(int64(step) + delta)
+		want, err := stepCode(secret, candidate)
 		if err != nil {
-			return false
+			return 0, false
 		}
 		if subtle.ConstantTimeCompare([]byte(want), []byte(code)) == 1 {
-			return true
+			return candidate, true
 		}
 	}
-	return false
+	return 0, false
+}
+
+// Validate is the boolean form used by setup flows that do not need the step.
+func Validate(secret, code string, at time.Time) bool {
+	_, ok := ValidateStep(secret, code, at)
+	return ok
 }
 
 func ProvisioningURL(issuer, account, secret string) string {

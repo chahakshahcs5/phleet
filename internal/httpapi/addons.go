@@ -283,12 +283,14 @@ func (s *Server) encryptAddonCreds(c addonCreds) (string, error) {
 	return secrets.Encrypt(s.cfg.SessionKey, raw)
 }
 
-func randomHex(n int) string {
+var randomRead = rand.Read
+
+func randomHex(n int) (string, error) {
 	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return hex.EncodeToString([]byte(strconv.FormatInt(time.Now().UnixNano(), 10)))
+	if _, err := randomRead(b); err != nil {
+		return "", fmt.Errorf("secure random unavailable: %w", err)
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }
 
 func dbIdentifier(name string) string {
@@ -767,16 +769,31 @@ func (s *Server) createAddon(w http.ResponseWriter, r *http.Request, service boo
 			return
 		}
 	}
+	password, err := randomHex(24)
+	if err != nil {
+		apiErr(w, 500, err)
+		return
+	}
+	superPassword, err := randomHex(24)
+	if err != nil {
+		apiErr(w, 500, err)
+		return
+	}
 	creds := addonCreds{
 		User:          dbIdentifier(name),
-		Password:      randomHex(24),
+		Password:      password,
 		Database:      dbIdentifier(name),
 		Superuser:     "phleet_admin",
-		SuperPassword: randomHex(24),
+		SuperPassword: superPassword,
 	}
 	if eng.Replication == "streaming" || eng.Replication == "async" {
+		replicaPass, err := randomHex(24)
+		if err != nil {
+			apiErr(w, 500, err)
+			return
+		}
 		creds.ReplicaUser = "replicator"
-		creds.ReplicaPass = randomHex(24)
+		creds.ReplicaPass = replicaPass
 	}
 	envEnc, err := s.encryptAddonCreds(creds)
 	if err != nil {
@@ -1051,8 +1068,13 @@ func (s *Server) handleAddStandby(w http.ResponseWriter, r *http.Request) {
 	}
 	needPrimary := creds.ReplicaUser == ""
 	if needPrimary {
+		replicaPass, err := randomHex(24)
+		if err != nil {
+			apiErr(w, 500, err)
+			return
+		}
 		creds.ReplicaUser = "replicator"
-		creds.ReplicaPass = randomHex(24)
+		creds.ReplicaPass = replicaPass
 		enc, err := s.encryptAddonCreds(creds)
 		if err != nil {
 			apiErr(w, 500, err)

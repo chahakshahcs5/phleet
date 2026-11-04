@@ -58,6 +58,8 @@ type Server struct {
 	authMu    sync.Mutex
 	authFails map[string]authFailure
 
+	totpMu sync.Mutex
+
 	tunnel *tunnelManager
 
 	bridges *tcpBridge
@@ -400,7 +402,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 // ---- auth ----
 
 func (s *Server) signPayload(payload string) string {
-	mac := hmac.New(sha256.New, s.cfg.SessionKey)
+	mac := hmac.New(sha256.New, s.cfg.SigningKey)
 	mac.Write([]byte(payload))
 	return payload + "|" + hex.EncodeToString(mac.Sum(nil))
 }
@@ -409,8 +411,8 @@ func (s *Server) sign(exp int64) string {
 	return s.signPayload("phleet|" + strconv.FormatInt(exp, 10))
 }
 
-func (s *Server) userSession(userID string, exp int64) string {
-	return s.signPayload("phleet|user|" + userID + "|" + strconv.FormatInt(exp, 10))
+func (s *Server) userSession(userID string, version, exp int64) string {
+	return s.signPayload("phleet|user|" + userID + "|" + strconv.FormatInt(version, 10) + "|" + strconv.FormatInt(exp, 10))
 }
 
 func (s *Server) validPayload(v string, wantLen int) bool {
@@ -422,19 +424,23 @@ func (s *Server) validPayload(v string, wantLen int) bool {
 	return subtle.ConstantTimeCompare([]byte(expect), []byte(v)) == 1
 }
 
-func (s *Server) sessionUserID(v string) (string, bool) {
+func (s *Server) sessionUserID(v string) (string, int64, bool) {
 	parts := strings.Split(v, "|")
-	if len(parts) != 5 || parts[0] != "phleet" || parts[1] != "user" {
-		return "", false
+	if len(parts) != 6 || parts[0] != "phleet" || parts[1] != "user" {
+		return "", 0, false
 	}
-	exp, err := strconv.ParseInt(parts[3], 10, 64)
+	version, err := strconv.ParseInt(parts[3], 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	exp, err := strconv.ParseInt(parts[4], 10, 64)
 	if err != nil || time.Now().Unix() > exp {
-		return "", false
+		return "", 0, false
 	}
-	if !s.validPayload(v, 5) {
-		return "", false
+	if !s.validPayload(v, 6) {
+		return "", 0, false
 	}
-	return parts[2], true
+	return parts[2], version, true
 }
 
 func (s *Server) validSession(v string) bool {
@@ -601,7 +607,12 @@ func (s *Server) agentHelloAuth(tok, serverID string, canEnroll bool) (bool, str
 	// out of its own phone.
 	if secureEq(tok, s.cfg.AgentToken) {
 		if canEnroll {
-			return true, randomHex(32)
+			deviceToken, err := randomHex(32)
+			if err != nil {
+				s.log.Error("cannot generate device token", "err", err)
+				return false, ""
+			}
+			return true, deviceToken
 		}
 		return true, ""
 	}
@@ -672,8 +683,8 @@ func (s *Server) panelRole(r *http.Request) string {
 	if s.validSession(c.Value) {
 		return "admin"
 	}
-	if id, ok := s.sessionUserID(c.Value); ok {
-		if u, err := s.st.GetUser(id); err == nil && !u.Disabled {
+	if id, version, ok := s.sessionUserID(c.Value); ok {
+		if u, err := s.st.GetUser(id); err == nil && !u.Disabled && u.SessionVersion == version {
 			switch u.Role {
 			case "admin", "deployer":
 				return u.Role
@@ -692,12 +703,12 @@ func (s *Server) currentUser(r *http.Request) (model.User, bool) {
 	if err != nil {
 		return model.User{}, false
 	}
-	id, ok := s.sessionUserID(c.Value)
+	id, version, ok := s.sessionUserID(c.Value)
 	if !ok {
 		return model.User{}, false
 	}
 	u, err := s.st.GetUser(id)
-	if err != nil || u.Disabled {
+	if err != nil || u.Disabled || u.SessionVersion != version {
 		return model.User{}, false
 	}
 	return u, true
@@ -790,7 +801,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		s.loginSucceeded(r)
 		_ = s.st.AddEvent("auth", "login.success", u.ID, "user:"+u.Username+" ip:"+requestIP(r))
-		s.setSessionCookie(w, r, s.userSession(u.ID, exp), exp)
+		s.setSessionCookie(w, r, s.userSession(u.ID, u.SessionVersion, exp), exp)
 		writeJSON(w, 200, map[string]any{"ok": true, "version": config.Version, "role": u.Role, "username": u.Username})
 		return
 	}

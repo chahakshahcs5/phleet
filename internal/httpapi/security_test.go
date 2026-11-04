@@ -286,6 +286,33 @@ func TestViewerAPITokenIsReadOnly(t *testing.T) {
 	}
 }
 
+func TestPasswordResetInvalidatesSessions(t *testing.T) {
+	s := testServer(t)
+	hash, err := auth.HashPassword("password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := model.User{ID: "u-session", Username: "session", PasswordHash: hash, Role: "viewer", SessionVersion: 1}
+	if err := s.st.CreateUser(u); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	exp := time.Now().Add(time.Hour).Unix()
+	req.AddCookie(&http.Cookie{Name: "phleet_session", Value: s.userSession(u.ID, u.SessionVersion, exp)})
+	if _, ok := s.currentUser(req); !ok {
+		t.Fatal("session should be valid before reset")
+	}
+
+	u.PasswordHash = hash
+	u.SessionVersion++
+	if err := s.st.UpdateUser(u); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.currentUser(req); ok {
+		t.Fatal("session must be invalid after password reset")
+	}
+}
+
 func TestLoginIsRateLimited(t *testing.T) {
 	s := testServer(t)
 	attempt := func(token string) int {
@@ -339,6 +366,9 @@ func TestAdminTOTPIsRequired(t *testing.T) {
 	}
 	if status := login(code); status != http.StatusOK {
 		t.Fatalf("correct TOTP = %d", status)
+	}
+	if status := login(code); status != http.StatusUnauthorized {
+		t.Fatalf("replayed TOTP = %d, want 401", status)
 	}
 }
 

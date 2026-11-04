@@ -289,15 +289,17 @@ CREATE TABLE IF NOT EXISTS addon_logs (
 CREATE INDEX IF NOT EXISTS idx_addon_logs ON addon_logs(addon_id, id);
 
 CREATE TABLE IF NOT EXISTS users (
-  id            TEXT PRIMARY KEY,
-  username      TEXT NOT NULL UNIQUE,
-  password_hash TEXT NOT NULL,
-  role          TEXT NOT NULL DEFAULT 'viewer',
-  totp_secret   TEXT NOT NULL DEFAULT '',
-  totp_pending  TEXT NOT NULL DEFAULT '',
-  disabled      INTEGER NOT NULL DEFAULT 0,
-  created_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL
+  id              TEXT PRIMARY KEY,
+  username        TEXT NOT NULL UNIQUE,
+  password_hash   TEXT NOT NULL,
+  role            TEXT NOT NULL DEFAULT 'viewer',
+  totp_secret     TEXT NOT NULL DEFAULT '',
+  totp_pending    TEXT NOT NULL DEFAULT '',
+  totp_last_step  INTEGER NOT NULL DEFAULT 0,
+  disabled        INTEGER NOT NULL DEFAULT 0,
+  session_version INTEGER NOT NULL DEFAULT 1,
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS api_tokens (
@@ -442,6 +444,8 @@ func Open(path string) (*Store, error) {
 		{"backups", "remote_key", "TEXT NOT NULL DEFAULT ''"},
 		{"backups", "remote_error", "TEXT NOT NULL DEFAULT ''"},
 		{"backups", "remote_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"users", "totp_last_step", "INTEGER NOT NULL DEFAULT 0"},
+		{"users", "session_version", "INTEGER NOT NULL DEFAULT 1"},
 	}
 	for _, m := range migrations {
 		if err := ensureColumn(db, m.table, m.column, m.decl); err != nil {

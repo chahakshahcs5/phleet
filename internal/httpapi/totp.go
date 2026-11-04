@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,8 +13,9 @@ import (
 )
 
 const (
-	settingTOTPSecret  = "admin_totp_secret"
-	settingTOTPPending = "admin_totp_pending"
+	settingTOTPSecret   = "admin_totp_secret"
+	settingTOTPPending  = "admin_totp_pending"
+	settingTOTPLastStep = "admin_totp_last_step"
 )
 
 func (s *Server) totpEnabled() bool {
@@ -38,7 +40,23 @@ func (s *Server) validateTOTP(code string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return totp.Validate(secret, code, time.Now()), nil
+	step, ok := totp.ValidateStep(secret, code, time.Now())
+	if !ok {
+		return false, nil
+	}
+	// Serialize the compare-and-set so two concurrent logins cannot both
+	// accept the same one-time code.
+	s.totpMu.Lock()
+	defer s.totpMu.Unlock()
+	lastRaw, _ := s.st.GetSetting(settingTOTPLastStep)
+	last, _ := strconv.ParseInt(strings.TrimSpace(lastRaw), 10, 64)
+	if int64(step) <= last {
+		return false, nil
+	}
+	if err := s.st.SetSetting(settingTOTPLastStep, strconv.FormatUint(step, 10)); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Server) validateUserTOTP(u model.User, code string) (bool, error) {
@@ -49,7 +67,24 @@ func (s *Server) validateUserTOTP(u model.User, code string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return totp.Validate(string(raw), code, time.Now()), nil
+	step, ok := totp.ValidateStep(string(raw), code, time.Now())
+	if !ok {
+		return false, nil
+	}
+	s.totpMu.Lock()
+	defer s.totpMu.Unlock()
+	fresh, err := s.st.GetUser(u.ID)
+	if err != nil || fresh.Disabled || fresh.TOTPSecret == "" {
+		return false, nil
+	}
+	if int64(step) <= fresh.TOTPLastStep {
+		return false, nil
+	}
+	fresh.TOTPLastStep = int64(step)
+	if err := s.st.UpdateUser(fresh); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Server) handleGetTOTP(w http.ResponseWriter, r *http.Request) {
@@ -116,7 +151,8 @@ func (s *Server) handleEnableTOTP(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 500, err)
 		return
 	}
-	if !totp.Validate(string(raw), body.Code, time.Now()) {
+	step, ok := totp.ValidateStep(string(raw), body.Code, time.Now())
+	if !ok {
 		apiErr(w, 401, errors.New("invalid code"))
 		return
 	}
@@ -128,12 +164,17 @@ func (s *Server) handleEnableTOTP(w http.ResponseWriter, r *http.Request) {
 	if u, ok := s.currentUser(r); ok {
 		u.TOTPSecret = enc
 		u.TOTPPending = ""
+		u.TOTPLastStep = int64(step)
 		if err := s.st.UpdateUser(u); err != nil {
 			apiErr(w, 500, err)
 			return
 		}
 	} else {
 		if err := s.st.SetSetting(settingTOTPSecret, enc); err != nil {
+			apiErr(w, 500, err)
+			return
+		}
+		if err := s.st.SetSetting(settingTOTPLastStep, strconv.FormatUint(step, 10)); err != nil {
 			apiErr(w, 500, err)
 			return
 		}
@@ -147,10 +188,12 @@ func (s *Server) handleDisableTOTP(w http.ResponseWriter, r *http.Request) {
 	if u, ok := s.currentUser(r); ok {
 		u.TOTPSecret = ""
 		u.TOTPPending = ""
+		u.TOTPLastStep = 0
 		_ = s.st.UpdateUser(u)
 	} else {
 		_ = s.st.DeleteSetting(settingTOTPSecret)
 		_ = s.st.DeleteSetting(settingTOTPPending)
+		_ = s.st.DeleteSetting(settingTOTPLastStep)
 	}
 	_ = s.st.AddEvent("ui", "totp.disable", "", "")
 	writeJSON(w, 200, map[string]any{"enabled": false})

@@ -87,6 +87,9 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		u.Role = role
 	}
 	if body.Disabled != nil {
+		if *body.Disabled != u.Disabled {
+			u.SessionVersion++
+		}
 		u.Disabled = *body.Disabled
 	}
 	if err := s.st.UpdateUser(u); err != nil {
@@ -116,6 +119,7 @@ func (s *Server) handleResetUserPassword(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	u.PasswordHash = hash
+	u.SessionVersion++
 	if err := s.st.UpdateUser(u); err != nil {
 		apiErr(w, 500, err)
 		return

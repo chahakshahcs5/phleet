@@ -38,7 +38,11 @@ func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 400, errors.New("role must be admin, deployer or viewer"))
 		return
 	}
-	tok := randomHex(32)
+	tok, err := randomHex(32)
+	if err != nil {
+		apiErr(w, 500, err)
+		return
+	}
 	t := model.APIToken{
 		ID: uuid.NewString(), Name: name, Role: role,
 	}

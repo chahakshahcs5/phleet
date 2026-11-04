@@ -7,13 +7,13 @@ import (
 	"phleet/internal/model"
 )
 
-const userCols = `id,username,password_hash,role,totp_secret,totp_pending,disabled,created_at,updated_at`
+const userCols = `id,username,password_hash,role,totp_secret,totp_pending,totp_last_step,disabled,session_version,created_at,updated_at`
 
 func (s *Store) scanUser(row interface{ Scan(...any) error }) (model.User, error) {
 	var u model.User
 	var disabled int
 	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.TOTPSecret, &u.TOTPPending,
-		&disabled, &u.CreatedAt, &u.UpdatedAt)
+		&u.TOTPLastStep, &disabled, &u.SessionVersion, &u.CreatedAt, &u.UpdatedAt)
 	u.Disabled = disabled != 0
 	if errors.Is(err, sql.ErrNoRows) {
 		return u, ErrNotFound
@@ -29,10 +29,14 @@ func (s *Store) CreateUser(u model.User) error {
 	if u.Role == "" {
 		u.Role = "viewer"
 	}
+	if u.SessionVersion == 0 {
+		u.SessionVersion = 1
+	}
 	_, err := s.db.Exec(`INSERT INTO users
-(id,username,password_hash,role,totp_secret,totp_pending,disabled,created_at,updated_at)
-VALUES (?,?,?,?,?,?,0,?,?)`,
-		u.ID, u.Username, u.PasswordHash, u.Role, u.TOTPSecret, u.TOTPPending, u.CreatedAt, ts)
+(id,username,password_hash,role,totp_secret,totp_pending,totp_last_step,disabled,session_version,created_at,updated_at)
+VALUES (?,?,?,?,?,?,?,0,?,?,?)`,
+		u.ID, u.Username, u.PasswordHash, u.Role, u.TOTPSecret, u.TOTPPending, u.TOTPLastStep,
+		u.SessionVersion, u.CreatedAt, ts)
 	return err
 }
 
@@ -66,9 +70,13 @@ func (s *Store) UpdateUser(u model.User) error {
 	if u.Disabled {
 		disabled = 1
 	}
+	if u.SessionVersion == 0 {
+		u.SessionVersion = 1
+	}
 	_, err := s.db.Exec(`UPDATE users SET username=?, password_hash=?, role=?, totp_secret=?,
-totp_pending=?, disabled=?, updated_at=? WHERE id=?`,
-		u.Username, u.PasswordHash, u.Role, u.TOTPSecret, u.TOTPPending, disabled, now(), u.ID)
+totp_pending=?, totp_last_step=?, disabled=?, session_version=?, updated_at=? WHERE id=?`,
+		u.Username, u.PasswordHash, u.Role, u.TOTPSecret, u.TOTPPending, u.TOTPLastStep,
+		disabled, u.SessionVersion, now(), u.ID)
 	return err
 }
 
