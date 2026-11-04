@@ -226,6 +226,8 @@ func webhookRefMatches(p model.Project, ref string) bool {
 // deployAtRef triggers one deployment per online replica. A stack deploys all
 // of its child services at the same commit.
 func (s *Server) deployAtRef(p model.Project, ref string) (int, error) {
+	s.deployMu.Lock()
+	defer s.deployMu.Unlock()
 	targets := []model.Project{p}
 	if p.Kind == "stack" {
 		children, err := s.st.ListChildProjects(p.ID)

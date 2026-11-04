@@ -286,6 +286,29 @@ func TestViewerAPITokenIsReadOnly(t *testing.T) {
 	}
 }
 
+func TestLoginIsRateLimited(t *testing.T) {
+	s := testServer(t)
+	attempt := func(token string) int {
+		body := `{"token":"` + token + `"}`
+		req := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rr, req)
+		return rr.Code
+	}
+	for i := 0; i < authMaxFails; i++ {
+		if code := attempt("wrong"); code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d = %d, want 401", i+1, code)
+		}
+	}
+	if code := attempt("wrong"); code != http.StatusTooManyRequests {
+		t.Fatalf("after lockout = %d, want 429", code)
+	}
+	if code := attempt(s.cfg.AdminToken); code != http.StatusTooManyRequests {
+		t.Fatalf("correct token during lockout = %d, want 429", code)
+	}
+}
+
 func TestAdminTOTPIsRequired(t *testing.T) {
 	s := testServer(t)
 	secret, err := totp.GenerateSecret()

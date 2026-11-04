@@ -200,7 +200,17 @@ func (m *tunnelManager) startProcess() error {
 	if err != nil {
 		return fmt.Errorf("open cloudflared log: %w", err)
 	}
-	cmd := exec.Command(binary, "tunnel", "--no-autoupdate", "run", "--token", conf.TunnelToken)
+	// cloudflared reads TUNNEL_TOKEN for `tunnel run`; keeping it out of argv
+	// stops local users from reading the tunnel credential from a process list.
+	cmd := exec.Command(binary, "tunnel", "--no-autoupdate", "run")
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "TUNNEL_TOKEN=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	cmd.Env = append(env, "TUNNEL_TOKEN="+conf.TunnelToken)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	hideProcessWindow(cmd)

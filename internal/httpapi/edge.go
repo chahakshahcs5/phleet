@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 )
@@ -33,17 +34,14 @@ func (s *Server) Edge() (publicURL, fleetHost string) {
 // and private-network addresses are always allowed so LAN access keeps working.
 func (s *Server) hostGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, fleetHost := s.Edge()
+		publicURL, fleetHost := s.Edge()
 		if fleetHost == "" {
 			next.ServeHTTP(w, r)
 			return
 		}
-		host := r.Host
-		if h, _, err := net.SplitHostPort(host); err == nil {
-			host = h
-		}
-		host = strings.ToLower(strings.Trim(host, "[]"))
-		if strings.EqualFold(host, fleetHost) || host == "localhost" || isPrivateHost(host) {
+		host := normalizeHost(r.Host)
+		if strings.EqualFold(host, fleetHost) || host == "localhost" || isPrivateHost(host) ||
+			hostMatchesURL(publicURL, host) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -51,6 +49,11 @@ func (s *Server) hostGuard(next http.Handler) http.Handler {
 		w.WriteHeader(http.StatusNotFound)
 		fmt.Fprintf(w, "no app is routed to %s\n", host)
 	})
+}
+
+func hostMatchesURL(rawURL, host string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	return err == nil && u.Host != "" && strings.EqualFold(normalizeHost(u.Host), host)
 }
 
 func isPrivateHost(host string) bool {

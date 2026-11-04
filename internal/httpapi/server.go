@@ -35,9 +35,10 @@ type Server struct {
 	started time.Time
 	edge    edgeState
 
-	rrMu   sync.Mutex
-	rr     map[string]int
-	portMu sync.Mutex
+	rrMu     sync.Mutex
+	rr       map[string]int
+	portMu   sync.Mutex
+	deployMu sync.Mutex
 
 	orphanMu sync.Mutex
 	orphans  map[string]time.Time
@@ -53,6 +54,9 @@ type Server struct {
 
 	apiUseMu sync.Mutex
 	apiUse   map[string]time.Time
+
+	authMu    sync.Mutex
+	authFails map[string]authFailure
 
 	tunnel *tunnelManager
 
@@ -77,6 +81,7 @@ func New(cfg *config.Config, st *store.Store, log *slog.Logger) *Server {
 		offlineTimers: map[string]*time.Timer{},
 		pendingDevice: map[string]string{},
 		apiUse:        map[string]time.Time{},
+		authFails:     map[string]authFailure{},
 		reconcileCh:   make(chan struct{}, 1),
 		reqLogCh:      make(chan model.RequestLog, 2048),
 		appMetricAt:   map[string]time.Time{},
@@ -94,7 +99,10 @@ func New(cfg *config.Config, st *store.Store, log *slog.Logger) *Server {
 		OnTaskEvent:   s.onTaskEvent,
 	})
 	s.routes()
-	s.panel = s.guard(securityHeaders(s.mux))
+	// The host guard covers not just the SPA but also /api, /agent, /hooks and
+	// /download, so a wildcard project hostname cannot be used to reach the
+	// panel API. Project/app traffic is proxied before this handler runs.
+	s.panel = s.hostGuard(s.guard(securityHeaders(s.mux)))
 	s.warnSlugCollisions()
 	return s
 }
@@ -446,6 +454,66 @@ func secureEq(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
+const (
+	authFailWindow = 15 * time.Minute
+	authLockTime   = 15 * time.Minute
+	authMaxFails   = 10
+)
+
+type authFailure struct {
+	count int
+	first time.Time
+	until time.Time
+}
+
+// loginBlocked implements a small in-memory throttle for password/token
+// attempts. It is intentionally per-process: a restart clears the counters,
+// but it is enough to stop online guessing against a public panel.
+func (s *Server) loginBlocked(r *http.Request) (time.Duration, bool) {
+	key := requestIP(r)
+	now := time.Now()
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	f, ok := s.authFails[key]
+	if !ok {
+		return 0, false
+	}
+	if !f.until.IsZero() {
+		if now.Before(f.until) {
+			return time.Until(f.until), true
+		}
+		delete(s.authFails, key)
+		return 0, false
+	}
+	if now.Sub(f.first) > authFailWindow {
+		delete(s.authFails, key)
+	}
+	return 0, false
+}
+
+func (s *Server) loginFailed(r *http.Request) {
+	key := requestIP(r)
+	now := time.Now()
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	f := s.authFails[key]
+	if f.first.IsZero() || now.Sub(f.first) > authFailWindow {
+		f = authFailure{count: 0, first: now}
+	}
+	f.count++
+	if f.count >= authMaxFails {
+		f.until = now.Add(authLockTime)
+	}
+	s.authFails[key] = f
+}
+
+func (s *Server) loginSucceeded(r *http.Request) {
+	key := requestIP(r)
+	s.authMu.Lock()
+	delete(s.authFails, key)
+	s.authMu.Unlock()
+}
+
 func bearer(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	if strings.HasPrefix(h, "Bearer ") {
@@ -692,10 +760,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "invalid body"})
 		return
 	}
+	if wait, blocked := s.loginBlocked(r); blocked {
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too many failed sign-in attempts; try again later"})
+		return
+	}
 	exp := time.Now().Add(30 * 24 * time.Hour).Unix()
 	if strings.TrimSpace(body.Username) != "" {
-		u, err := s.st.GetUserByUsername(strings.TrimSpace(body.Username))
+		username := strings.TrimSpace(body.Username)
+		u, err := s.st.GetUserByUsername(username)
 		if err != nil || u.Disabled || !auth.VerifyPassword(body.Password, u.PasswordHash) {
+			s.loginFailed(r)
+			_ = s.st.AddEvent("auth", "login.failed", "", "user:"+username+" ip:"+requestIP(r))
 			time.Sleep(250 * time.Millisecond)
 			writeJSON(w, 401, map[string]any{"error": "wrong username or password"})
 			return
@@ -706,15 +782,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !ok {
+			s.loginFailed(r)
+			_ = s.st.AddEvent("auth", "login.failed", "", "user:"+u.Username+" ip:"+requestIP(r)+" (2FA)")
 			time.Sleep(250 * time.Millisecond)
 			writeJSON(w, 401, map[string]any{"error": "invalid 2FA code"})
 			return
 		}
+		s.loginSucceeded(r)
+		_ = s.st.AddEvent("auth", "login.success", u.ID, "user:"+u.Username+" ip:"+requestIP(r))
 		s.setSessionCookie(w, r, s.userSession(u.ID, exp), exp)
 		writeJSON(w, 200, map[string]any{"ok": true, "version": config.Version, "role": u.Role, "username": u.Username})
 		return
 	}
 	if !secureEq(strings.TrimSpace(body.Token), s.cfg.AdminToken) {
+		s.loginFailed(r)
+		_ = s.st.AddEvent("auth", "login.failed", "", "admin token ip:"+requestIP(r))
 		time.Sleep(250 * time.Millisecond)
 		writeJSON(w, 401, map[string]any{"error": "wrong token"})
 		return
@@ -726,11 +808,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !ok {
+			s.loginFailed(r)
+			_ = s.st.AddEvent("auth", "login.failed", "", "admin token ip:"+requestIP(r)+" (2FA)")
 			time.Sleep(250 * time.Millisecond)
 			writeJSON(w, 401, map[string]any{"error": "invalid 2FA code"})
 			return
 		}
 	}
+	s.loginSucceeded(r)
+	_ = s.st.AddEvent("auth", "login.success", "", "admin token ip:"+requestIP(r))
 	s.setSessionCookie(w, r, s.sign(exp), exp)
 	writeJSON(w, 200, map[string]any{"ok": true, "version": config.Version, "role": "admin"})
 }
