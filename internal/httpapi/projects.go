@@ -1507,10 +1507,16 @@ func (s *Server) handleProjectAction(action string) http.HandlerFunc {
 			addons := s.stackOwnAddons(p)
 			results := []map[string]any{}
 			// Dependencies start first and stop last, so a start has its
-			// database ready and a stop shuts the apps down cleanly.
-			if action == "start" {
+			// database ready and a stop shuts the apps down cleanly. A stack
+			// restart brings its databases back too: restart running addons and
+			// start stopped ones before touching the services.
+			if action == "start" || action == "restart" {
 				for _, a := range addons {
-					if _, err := s.runAddonAction(r.Context(), a, "start"); err != nil {
+					addonAction := "start"
+					if action == "restart" && a.Status == "running" {
+						addonAction = "restart"
+					}
+					if _, err := s.runAddonAction(r.Context(), a, addonAction); err != nil {
 						results = append(results, map[string]any{"addon": a.Name, "ok": false, "error": err.Error()})
 					} else {
 						results = append(results, map[string]any{"addon": a.Name, "ok": true})
