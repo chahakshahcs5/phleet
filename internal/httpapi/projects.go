@@ -659,6 +659,20 @@ func projectDeployable(p model.Project) bool {
 // normalizeDeployRef accepts a branch, tag or commit SHA. Git refs are passed
 // as an argv element, not through a shell, but reject obvious traversal and
 // option-like values anyway.
+func isShortHexRef(v string) bool {
+	if len(v) < 7 || len(v) >= 40 {
+		return false
+	}
+	for _, r := range v {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func normalizeDeployRef(v string) (string, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -670,6 +684,12 @@ func normalizeDeployRef(v string) (string, error) {
 		strings.HasSuffix(v, "/") ||
 		strings.HasSuffix(v, ".lock") {
 		return "", errors.New("ref must be a branch, tag or commit SHA")
+	}
+	// Git cannot fetch an arbitrary short SHA with --depth 1. Treat it as an
+	// error up front instead of failing later on the phone with a confusing
+	// checkout message. A 40-character SHA still works.
+	if isShortHexRef(v) {
+		return "", errors.New("short commit SHAs are not supported; use the full 40-character SHA, or a branch/tag name")
 	}
 	return v, nil
 }
@@ -1312,6 +1332,10 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 404, err)
 		return
 	}
+	// Serialize the inflight check and deployment-row creation. Two concurrent
+	// clicks or a webhook racing the panel must not queue duplicate releases.
+	s.deployMu.Lock()
+	defer s.deployMu.Unlock()
 	ref := ""
 	if r.ContentLength != 0 {
 		var body struct {
