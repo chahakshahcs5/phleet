@@ -187,7 +187,10 @@ func (c *Client) DNSRecords(ctx context.Context, zoneID, name string) ([]DNSReco
 	return out, nil
 }
 
-// UpsertCNAME creates or updates a proxied CNAME record.
+// UpsertCNAME creates or updates a proxied CNAME record. It only modifies an
+// existing CNAME; an A/AAAA (or other) record at the same name is left alone
+// and reported as an error, because replacing it would silently break another
+// service.
 func (c *Client) UpsertCNAME(ctx context.Context, zoneID, name, target string) (string, error) {
 	records, err := c.DNSRecords(ctx, zoneID, name)
 	if err != nil {
@@ -201,19 +204,29 @@ func (c *Client) UpsertCNAME(ctx context.Context, zoneID, name, target string) (
 		"ttl":     1,
 		"comment": "managed by phleet",
 	}
-	for _, rec := range records {
-		if rec.Type == "CNAME" && strings.EqualFold(rec.Content, target) && rec.Proxied {
-			return "unchanged", nil
+	var cname *DNSRecord
+	for i := range records {
+		if strings.EqualFold(records[i].Type, "CNAME") {
+			cname = &records[i]
+			break
 		}
-		if err := c.do(ctx, http.MethodPatch, fmt.Sprintf("/zones/%s/dns_records/%s", zoneID, rec.ID), body, nil); err != nil {
+	}
+	if cname == nil {
+		if len(records) > 0 {
+			return "", fmt.Errorf("cannot create CNAME %s: an existing %s record uses that name", name, records[0].Type)
+		}
+		if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/zones/%s/dns_records", zoneID), body, nil); err != nil {
 			return "", err
 		}
-		return "updated", nil
+		return "created", nil
 	}
-	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/zones/%s/dns_records", zoneID), body, nil); err != nil {
+	if strings.EqualFold(cname.Content, target) && cname.Proxied {
+		return "unchanged", nil
+	}
+	if err := c.do(ctx, http.MethodPatch, fmt.Sprintf("/zones/%s/dns_records/%s", zoneID, cname.ID), body, nil); err != nil {
 		return "", err
 	}
-	return "created", nil
+	return "updated", nil
 }
 
 func truncate(s string, n int) string {
