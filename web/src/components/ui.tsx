@@ -194,6 +194,40 @@ export function KeyValue({ label, children }: { label: string; children: ReactNo
   )
 }
 
+export function Tabs<T extends string>({
+  tabs,
+  value,
+  onChange,
+  className,
+}: {
+  tabs: { id: T; label: string; icon?: ReactNode; badge?: ReactNode }[]
+  value: T
+  onChange: (id: T) => void
+  className?: string
+}) {
+  return (
+    <div className={cn('flex gap-1 overflow-x-auto border-b border-zinc-800/70', className)}>
+      {tabs.map((tab) => (
+        <button
+          key={tab.id}
+          type="button"
+          onClick={() => onChange(tab.id)}
+          className={cn(
+            'flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs whitespace-nowrap transition-colors',
+            value === tab.id
+              ? 'border-emerald-400 text-zinc-100'
+              : 'border-transparent text-zinc-500 hover:text-zinc-300',
+          )}
+        >
+          {tab.icon}
+          {tab.label}
+          {tab.badge}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 export function DeployBadge({ status }: { status?: string }) {
   const s = status || 'unknown'
   const tone: 'good' | 'warn' | 'bad' | 'info' | 'neutral' =
