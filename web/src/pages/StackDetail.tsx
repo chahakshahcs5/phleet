@@ -59,7 +59,12 @@ function ServiceCard({ service }: { service: ProjectView }) {
             </div>
           )}
         </div>
-        <DeployBadge status={aggregateStatus(service)} />
+        <div className="flex flex-wrap items-center justify-end gap-1">
+          <DeployBadge status={aggregateStatus(service)} />
+          {service.latest && service.latest.status !== 'active' ? (
+            <DeployBadge status={service.latest.status} />
+          ) : null}
+        </div>
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-2 text-[10px] text-zinc-500">
