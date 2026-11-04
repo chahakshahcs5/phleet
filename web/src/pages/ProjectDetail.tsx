@@ -348,7 +348,7 @@ export default function ProjectDetail() {
               </div>
             </Card>
 
-            <Card className="flex min-h-[360px] flex-col overflow-hidden">
+            <Card className="flex h-[calc(100vh-260px)] min-h-[360px] max-h-[760px] flex-col overflow-hidden">
               {detail.data ? (
                 <>
                   <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/70 px-3 py-2">
@@ -383,7 +383,7 @@ export default function ProjectDetail() {
                   ) : null}
                   <pre
                     ref={deployLogRef}
-                    className="min-h-0 flex-1 overflow-auto bg-zinc-950 p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-zinc-300"
+                    className="min-h-0 flex-1 overflow-auto overscroll-contain bg-zinc-950 p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-zinc-300"
                   >
                     {detail.data.logs.length
                       ? detail.data.logs.map((l) => l.line).join('\n')
@@ -436,7 +436,7 @@ export default function ProjectDetail() {
                 const el = e.currentTarget
                 setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 40)
               }}
-              className="min-h-0 flex-1 overflow-auto bg-zinc-950 p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-zinc-300"
+              className="min-h-0 flex-1 overflow-auto overscroll-contain bg-zinc-950 p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-zinc-300"
             >
               {project.placements.length === 0
                 ? 'no replica yet — deploy the project first'
